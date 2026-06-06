@@ -1225,6 +1225,20 @@ export const cherryPick = Object.assign(
 	},
 );
 
+// API: rebase
+// ════════════════════════════════════════════════════════════════════════════
+
+export const rebase = Object.assign(
+	async function rebase(cwd: string, onto: string, signal?: AbortSignal): Promise<void> {
+		await runEffect(cwd, ["rebase", onto], { signal });
+	},
+	{
+		async abort(cwd: string, signal?: AbortSignal): Promise<void> {
+			await runEffect(cwd, ["rebase", "--abort"], { signal });
+		},
+	},
+);
+
 // ════════════════════════════════════════════════════════════════════════════
 // API: stash
 // ════════════════════════════════════════════════════════════════════════════
@@ -1245,6 +1259,10 @@ export const stash = {
 		const args = ["stash", "pop"];
 		if (options?.index) args.push("--index");
 		await runEffect(cwd, args);
+	},
+	/** Drop the most recent stash entry. */
+	async drop(cwd: string): Promise<void> {
+		await runEffect(cwd, ["stash", "drop"]);
 	},
 };
 

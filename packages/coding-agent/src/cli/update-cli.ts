@@ -5,14 +5,31 @@
  * Uses bun if available, otherwise downloads binary from GitHub releases.
  */
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
-import { pipeline } from "node:stream/promises";
+import { fileURLToPath } from "node:url";
 import { $which, APP_NAME, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
+import {
+	branch,
+	diff,
+	fetch as gitFetch,
+	head,
+	rebase,
+	ref,
+	remote,
+	repo,
+	restore,
+	stash,
+	status,
+	withRepoLock,
+} from "../utils/git";
 
 const REPO = "can1357/oh-my-pi";
+const EXPECTED_REMOTE_ORIGIN = "https://github.com/ql-isaac/oh-my-pi.git";
+const EXPECTED_REMOTE_UPSTREAM = "https://github.com/can1357/oh-my-pi.git";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 /**
  * Official npm registry origin.
@@ -26,6 +43,11 @@ const PACKAGE = "@oh-my-pi/pi-coding-agent";
  * See #1686.
  */
 const NPM_REGISTRY = "https://registry.npmjs.org/";
+
+const DEFAULT_REGISTRY = "https://registry.npmjs.org";
+const CACHE_DIR = path.join(os.homedir(), ".omp", "cache");
+const RELEASE_CACHE_FILE = path.join(CACHE_DIR, "release-cache.json");
+const RELEASE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Core native addon package. Bumped in lock-step with {@link PACKAGE} so the
@@ -57,6 +79,11 @@ function currentNativeTag(): string {
 interface ReleaseInfo {
 	tag: string;
 	version: string;
+}
+
+interface CachedRelease {
+	info: ReleaseInfo;
+	fetchedAt: number;
 }
 
 /** Result from running the installed binary and parsing its reported version. */
@@ -102,6 +129,99 @@ async function getBunGlobalBinDir(): Promise<string | undefined> {
 	}
 }
 
+function extractRegistryFromBunfig(content: string): string | undefined {
+	const match = content.match(/^\s*registry\s*=\s*["'](.+?)["']/m);
+	return match?.[1]?.replace(/\/$/, "") ?? undefined;
+}
+
+function extractRegistryFromNpmrc(content: string): string | undefined {
+	const match = content.match(/^\s*registry\s*=\s*(.+)/m);
+	return match?.[1]?.trim().replace(/\/$/, "") ?? undefined;
+}
+
+/**
+ * Resolve the npm registry URL the user has configured.
+ * Checks bunfig.toml (project then global), then ~/.npmrc, then falls back to npmjs.org.
+ */
+async function resolveRegistry(): Promise<string> {
+	const candidates = [path.join(process.cwd(), "bunfig.toml"), path.join(os.homedir(), ".bunfig.toml")];
+	for (const bunfig of candidates) {
+		try {
+			const content = await Bun.file(bunfig).text();
+			const registry = extractRegistryFromBunfig(content);
+			if (registry) return registry;
+		} catch {
+			// file not found or unreadable
+		}
+	}
+
+	try {
+		const content = await Bun.file(path.join(os.homedir(), ".npmrc")).text();
+		const registry = extractRegistryFromNpmrc(content);
+		if (registry) return registry;
+	} catch {
+		// file not found or unreadable
+	}
+
+	return DEFAULT_REGISTRY;
+}
+
+/**
+ * Parse bun.lock and extract package dependencies (name + version).
+ * Ignores resolved URLs and integrity hashes to detect semantic changes.
+ *
+ * bun.lock structure:
+ * - workspaces: workspace definitions
+ * - packages: resolved packages as [name@version, url, metadata, integrity]
+ */
+function parseLockfileDeps(content: string): Map<string, string> {
+	const deps = new Map<string, string>();
+	try {
+		const lockfile = JSON.parse(content);
+		const packages = lockfile.packages;
+		if (!packages || typeof packages !== "object") {
+			return deps;
+		}
+
+		for (const [key, value] of Object.entries(packages)) {
+			// Skip workspace packages (they don't have array format)
+			if (!Array.isArray(value)) continue;
+
+			// Format: [name@version, url, metadata, integrity]
+			const nameAtVersion = value[0];
+			if (typeof nameAtVersion !== "string") continue;
+
+			// Parse "name@version" - handle scoped packages like "@scope/pkg@1.0.0"
+			const lastAt = nameAtVersion.lastIndexOf("@");
+			if (lastAt === 0) continue; // Invalid format
+
+			const version = nameAtVersion.substring(lastAt + 1);
+
+			deps.set(key, version);
+		}
+	} catch (err) {
+		// Failed to parse lockfile, return empty map
+		console.log(chalk.yellow(`Warning: failed to parse lockfile: ${err}`));
+	}
+	return deps;
+}
+
+/**
+ * Compare two lockfile dependency maps.
+ * Returns true if they have the same packages and versions.
+ */
+function compareLockfileDeps(a: Map<string, string>, b: Map<string, string>): boolean {
+	if (a.size !== b.size) return false;
+	for (const [pkg, version] of a) {
+		if (b.get(pkg) !== version) return false;
+	}
+	return true;
+}
+
+function isCustomRegistry(registry: string): boolean {
+	return registry !== DEFAULT_REGISTRY;
+}
+
 function normalizePathForComparison(filePath: string): string {
 	const normalized = path.normalize(filePath);
 	if (process.platform === "win32") return normalized.toLowerCase();
@@ -125,13 +245,6 @@ function isPathInDirectoryLexical(filePath: string, directoryPath: string): bool
 
 function isPathInDirectory(filePath: string, directoryPath: string): boolean {
 	if (isPathInDirectoryLexical(filePath, directoryPath)) return true;
-	// Layer realpath resolution on top of the lexical guard. On Windows, ~/.bun
-	// is a junction when Bun is installed via Scoop, so `bun pm bin -g` and the
-	// PATH-resolved omp path can refer to the same directory through different
-	// strings. path.resolve does not traverse junctions/symlinks; realpath does.
-	// Resolve the file's parent directory to tolerate the file itself not yet
-	// existing (e.g. a fresh install path) while still catching link-traversed
-	// equality once the directory exists.
 	const fileDir = tryRealpath(path.dirname(path.resolve(filePath)));
 	const dirReal = tryRealpath(path.resolve(directoryPath));
 	if (!fileDir || !dirReal) return false;
@@ -139,7 +252,10 @@ function isPathInDirectory(filePath: string, directoryPath: string): boolean {
 	return isPathInDirectoryLexical(resolvedFile, dirReal);
 }
 
-type UpdateTarget = { method: "bun" } | { method: "binary"; path: string };
+type UpdateTarget =
+	| { method: "bun" }
+	| { method: "binary"; path: string }
+	| { method: "git"; repoRoot: string; branch: string; remote: string };
 
 function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
 	if (!bunBinDir) return "binary";
@@ -149,8 +265,67 @@ function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "b
 export function resolveUpdateMethodForTest(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
 	return resolveUpdateMethod(ompPath, bunBinDir);
 }
+
+/**
+ * Detect if the running process is from a git source clone of oh-my-pi.
+ */
+async function detectGitSourceInstall(): Promise<
+	{ isGitSource: true; repoRoot: string; branch: string; remote: string } | { isGitSource: false }
+> {
+	let scriptDir: string;
+	try {
+		scriptDir = path.dirname(fileURLToPath(import.meta.url));
+	} catch {
+		scriptDir = process.cwd();
+	}
+	const repoRoot = await repo.root(scriptDir);
+	if (!repoRoot) return { isGitSource: false };
+
+	const originUrl = await remote.url(repoRoot, "origin");
+	const normalizedOrigin = originUrl?.replace(/\.git$/, "").replace(/^https:\/\/github\.com\//, "") ?? "";
+	const expectedOrigin = EXPECTED_REMOTE_ORIGIN.replace(/\.git$/, "").replace(/^https:\/\/github\.com\//, "");
+	const expectedUpstream = EXPECTED_REMOTE_UPSTREAM.replace(/\.git$/, "").replace(/^https:\/\/github\.com\//, "");
+
+	let detectedRemote: string | null = null;
+
+	if (normalizedOrigin === expectedUpstream) {
+		detectedRemote = "origin";
+	} else if (normalizedOrigin === expectedOrigin) {
+		const upstreamUrl = await remote.url(repoRoot, "upstream");
+		const normalizedUpstream = upstreamUrl?.replace(/\.git$/, "").replace(/^https:\/\/github\.com\//, "") ?? "";
+		if (normalizedUpstream === expectedUpstream) {
+			detectedRemote = "upstream";
+		} else {
+			detectedRemote = "origin";
+		}
+	}
+
+	if (!detectedRemote) return { isGitSource: false };
+
+	const cliPath = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
+	const packageJsonPath = path.join(repoRoot, "package.json");
+	const cliFile = Bun.file(cliPath);
+	const packageJsonFile = Bun.file(packageJsonPath);
+	const [cliExists, packageJsonExists] = await Promise.all([cliFile.exists(), packageJsonFile.exists()]);
+	if (!cliExists || !packageJsonExists) return { isGitSource: false };
+
+	const branchName = await branch.current(repoRoot);
+
+	return {
+		isGitSource: true,
+		repoRoot,
+		branch: branchName ?? "HEAD",
+		remote: detectedRemote,
+	};
+}
+
 async function resolveUpdateTarget(): Promise<UpdateTarget> {
-	const bunBinDir = await getBunGlobalBinDir();
+	const [gitCheck, bunBinDir] = await Promise.all([detectGitSourceInstall(), getBunGlobalBinDir()]);
+
+	if (gitCheck.isGitSource) {
+		return { method: "git", repoRoot: gitCheck.repoRoot, branch: gitCheck.branch, remote: gitCheck.remote };
+	}
+
 	const ompPath = resolveOmpPath();
 
 	if (ompPath) {
@@ -164,24 +339,48 @@ async function resolveUpdateTarget(): Promise<UpdateTarget> {
 	throw new Error(`Could not resolve ${APP_NAME} binary path in PATH`);
 }
 
+async function readCachedRelease(): Promise<CachedRelease | null> {
+	try {
+		const cached = (await Bun.file(RELEASE_CACHE_FILE).json()) as CachedRelease;
+		if (cached && Date.now() - cached.fetchedAt < RELEASE_CACHE_TTL_MS) {
+			return cached;
+		}
+	} catch {
+		// cache miss or corrupt — fall through to network fetch
+	}
+	return null;
+}
+
+async function writeCachedRelease(info: ReleaseInfo): Promise<void> {
+	await Bun.write(RELEASE_CACHE_FILE, JSON.stringify({ info, fetchedAt: Date.now() }));
+}
+
 /**
- * Get the latest release info from the npm registry.
- * Uses npm instead of GitHub API to avoid unauthenticated rate limiting.
+ * Get the latest release info from the official npm registry.
+ *
+ * Always hits {@link NPM_REGISTRY} directly so the version check agrees with
+ * the pinned `--registry` flag in {@link buildBunInstallArgs} — using the
+ * user's configured mirror could resolve a version the mirror hasn't
+ * replicated yet. See #1686.
+ *
+ * Caches results locally for 5 minutes to avoid repeated network calls.
  */
 async function getLatestRelease(): Promise<ReleaseInfo> {
+	const cached = await readCachedRelease();
+	if (cached) return cached.info;
+
 	const response = await fetch(`${NPM_REGISTRY}${PACKAGE}/latest`);
 	if (!response.ok) {
-		throw new Error(`Failed to fetch release info: ${response.statusText}`);
+		throw new Error(`Failed to fetch release info from ${NPM_REGISTRY}: ${response.statusText}`);
 	}
 
 	const data = (await response.json()) as { version: string };
 	const version = data.version;
 	const tag = `v${version}`;
 
-	return {
-		tag,
-		version,
-	};
+	const info = { tag, version };
+	await writeCachedRelease(info);
+	return info;
 }
 
 /**
@@ -259,7 +458,6 @@ async function verifyInstalledVersion(expectedVersion: string): Promise<Installe
 		const result = await $`${ompPath} --version`.quiet().nothrow();
 		if (result.exitCode !== 0) return { ok: false, path: ompPath };
 		const output = result.text().trim();
-		// Output format: "omp/X.Y.Z"
 		const match = output.match(/\/(\d+\.\d+\.\d+)/);
 		const actual = match?.[1];
 		return { ok: actual === expectedVersion, actual, path: ompPath };
@@ -384,6 +582,12 @@ async function updateViaBun(expectedVersion: string): Promise<void> {
 	const args = buildBunInstallArgs(expectedVersion);
 	const result = await $`bun ${args}`.nothrow();
 	if (result.exitCode !== 0) {
+		const registry = await resolveRegistry();
+		if (isCustomRegistry(registry)) {
+			throw new Error(
+				`bun install failed (exit ${result.exitCode}). Your registry (${registry}) may not have synced v${expectedVersion} yet. Try again later or switch to the default registry.`,
+			);
+		}
 		throw new Error(`bun install failed with exit code ${result.exitCode}`);
 	}
 
@@ -403,11 +607,12 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 
 	const response = await fetch(url, { redirect: "follow" });
-	if (!response.ok || !response.body) {
+	if (!response.ok) {
 		throw new Error(`Download failed: ${response.statusText}`);
 	}
-	const fileStream = fs.createWriteStream(tempPath, { mode: 0o755 });
-	await pipeline(response.body, fileStream);
+	const buffer = await response.arrayBuffer();
+	await Bun.write(tempPath, buffer);
+	await fs.promises.chmod(tempPath, 0o755);
 
 	console.log(chalk.dim("Installing update..."));
 	await replaceBinaryForUpdate({
@@ -422,18 +627,191 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 }
 
 /**
+ * Update via git pull in a source clone.
+ * Handles local changes via git stash, updates deps via bun install,
+ * and reports the new git SHA as the version.
+ */
+async function updateViaGit(repoRoot: string, branch: string, remote: string, expectedVersion: string): Promise<void> {
+	console.log(chalk.dim(`Updating via git pull from ${remote}...`));
+
+	const summary = await status.summary(repoRoot);
+	let stashed = false;
+	if (summary && (summary.staged > 0 || summary.unstaged > 0 || summary.untracked > 0)) {
+		console.log(chalk.dim("Stashing local changes..."));
+		stashed = await stash.push(repoRoot, "omp-update stash");
+		console.log(chalk.dim("Local changes stashed."));
+	}
+
+	const oldSha = await head.sha(repoRoot);
+
+	await withRepoLock(repoRoot, async () => {
+		console.log(chalk.dim(`Rebasing onto ${remote}/${branch}...`));
+		try {
+			await rebase(repoRoot, `${remote}/${branch}`);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (msg.toLowerCase().includes("conflict")) {
+				throw new Error(
+					`Rebase conflicts detected on ${remote}/${branch}. Please resolve conflicts manually, run 'git rebase --abort' to cancel or 'git rebase --continue' to resolve, then run '${APP_NAME} update' again.`,
+				);
+			}
+			throw err;
+		}
+
+		const changedPaths = oldSha
+			? (await diff(repoRoot, { base: oldSha, nameOnly: true })).split("\n").filter(Boolean)
+			: [];
+
+		const nativeChanged = changedPaths.some(p => p.startsWith("crates/") || p.startsWith("packages/natives/"));
+		if (nativeChanged) {
+			console.log(
+				chalk.yellow(
+					`\n${theme.status.warning} Native source code changed. Run \`bun run build:native\` to rebuild.`,
+				),
+			);
+		}
+
+		const lockfilePath = path.join(repoRoot, "bun.lock");
+		if (await Bun.file(lockfilePath).exists()) {
+			const lockfileChanged = changedPaths.includes("bun.lock");
+			if (lockfileChanged) {
+				console.log(chalk.dim("Lockfile changed, updating dependencies..."));
+				const installResult = await $`bun install`.cwd(repoRoot).quiet().nothrow();
+				if (installResult.exitCode !== 0) {
+					const registry = await resolveRegistry();
+					if (isCustomRegistry(registry)) {
+						console.log(
+							chalk.red(
+								`\n${theme.status.error} Failed to install dependencies (exit ${installResult.exitCode}).`,
+							),
+						);
+						console.log(chalk.yellow(`  Your registry (${registry}) may not have synced new packages yet.`));
+						console.log(chalk.yellow(`  Run \`bun install\` manually or switch to the default registry.`));
+					} else {
+						console.log(
+							chalk.red(
+								`\n${theme.status.error} Failed to install dependencies (exit ${installResult.exitCode}). Run \`bun install\` manually.`,
+							),
+						);
+					}
+				}
+			}
+		}
+
+		const newSha = await head.short(repoRoot, 8);
+		console.log(chalk.green(`\n${theme.status.success} Updated to ${newSha ?? expectedVersion}`));
+	});
+
+	if (stashed) {
+		console.log(chalk.dim("Restoring local changes..."));
+		try {
+			await stash.pop(repoRoot);
+		} catch (err) {
+			const unmerged = await $`git diff --name-only --diff-filter=U`.cwd(repoRoot).quiet().nothrow();
+			const conflicted = unmerged.text().trim().split("\n").filter(Boolean);
+			const lockfileConflicts = conflicted.filter(f => f === "bun.lock");
+			const otherConflicts = conflicted.filter(f => f !== "bun.lock");
+
+			if (lockfileConflicts.length > 0 && otherConflicts.length === 0 && oldSha) {
+				const stashLockfile = await $`git show stash@{0}:bun.lock`.cwd(repoRoot).quiet().nothrow();
+				const oldLockfile = await $`git show ${oldSha}:bun.lock`.cwd(repoRoot).quiet().nothrow();
+
+				if (stashLockfile.exitCode !== 0 || oldLockfile.exitCode !== 0) {
+					console.log(chalk.yellow("Could not read lockfile from git history for comparison."));
+					console.log(chalk.yellow("Run `git stash pop` manually to resolve conflicts."));
+				} else {
+					const stashDeps = parseLockfileDeps(stashLockfile.text());
+					const oldDeps = parseLockfileDeps(oldLockfile.text());
+					const hasUserChanges = !compareLockfileDeps(stashDeps, oldDeps);
+
+					if (!hasUserChanges) {
+						console.log(chalk.dim("Lockfile conflict detected (mirror URL rewrite only), auto-resolving..."));
+						await restore(repoRoot, { source: "HEAD", staged: true, worktree: true, files: lockfileConflicts });
+						await stash.drop(repoRoot);
+						console.log(chalk.green(`${theme.status.success} Lockfile conflict auto-resolved.`));
+					} else {
+						console.log(chalk.yellow("Lockfile conflict detected with dependency changes."));
+						console.log(chalk.yellow("Your local changes include custom dependency modifications."));
+						console.log(chalk.yellow("Run `git stash pop` manually to resolve conflicts."));
+					}
+				}
+			} else {
+				console.log(chalk.yellow(`Warning: could not restore stashed changes: ${err}`));
+				if (otherConflicts.length > 0) {
+					console.log(chalk.yellow(`  Conflicted files: ${otherConflicts.join(", ")}`));
+					console.log(chalk.yellow(`  Run \`git stash pop\` manually to resolve.`));
+				}
+			}
+		}
+	}
+}
+
+/**
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
-	console.log(chalk.dim(`Current version: ${VERSION}`));
+	const target = await resolveUpdateTarget();
 
-	// Check for updates
+	if (target.method === "git") {
+		const sha = await head.short(target.repoRoot, 8);
+		const tags = await ref.tags(target.repoRoot, "HEAD");
+		const versionStr = tags.length > 0 ? `${tags[0]} (${sha})` : (sha ?? "unknown");
+		console.log(chalk.dim(`Current version: ${versionStr} (git source)`));
+	} else {
+		console.log(chalk.dim(`Current version: ${VERSION}`));
+	}
+
 	let release: ReleaseInfo;
 	try {
 		release = await getLatestRelease();
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
 		process.exit(1);
+	}
+
+	if (target.method === "git") {
+		await gitFetch(
+			target.repoRoot,
+			target.remote,
+			`refs/heads/${target.branch}`,
+			`refs/remotes/${target.remote}/${target.branch}`,
+		);
+
+		const localSha = await head.sha(target.repoRoot);
+		const remoteSha = await ref.resolve(target.repoRoot, `${target.remote}/${target.branch}`);
+
+		if (!remoteSha) {
+			console.log(
+				chalk.yellow(`No remote tracking for ${target.remote}/${target.branch}, cannot check for updates`),
+			);
+			return;
+		}
+
+		const comparison = localSha !== remoteSha ? 1 : 0;
+
+		if (comparison <= 0 && !opts.force) {
+			const sha = await head.short(target.repoRoot, 8);
+			console.log(chalk.green(`${theme.status.success} Already up to date at ${sha ?? localSha}`));
+			return;
+		}
+
+		if (comparison > 0) {
+			console.log(chalk.cyan(`New commits available on ${target.remote}/${target.branch}`));
+		} else {
+			console.log(chalk.yellow(`Forcing sync with ${target.remote}/${target.branch}`));
+		}
+
+		if (opts.check) {
+			return;
+		}
+
+		try {
+			await updateViaGit(target.repoRoot, target.branch, target.remote, release.version);
+		} catch (err) {
+			console.error(chalk.red(`Update failed: ${err}`));
+			process.exit(1);
+		}
+		return;
 	}
 
 	const comparison = compareVersions(release.version, VERSION);
@@ -450,13 +828,10 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 	}
 
 	if (opts.check) {
-		// Just check, don't install
 		return;
 	}
 
-	// Choose update method based on the prioritized omp binary in PATH
 	try {
-		const target = await resolveUpdateTarget();
 		if (target.method === "bun") {
 			await updateViaBun(release.version);
 		} else {
