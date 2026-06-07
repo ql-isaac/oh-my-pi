@@ -450,6 +450,15 @@ export const SETTINGS_SCHEMA = {
 			description: "Use the session name color for the editor border and status line gap",
 		},
 	},
+	"statusLine.transparentBg": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			label: "Transparent Status Bar",
+			description: "Remove background color from status line, showing terminal default background",
+		},
+	},
 	"tools.artifactSpillThreshold": {
 		type: "number",
 		default: 50,
@@ -3396,6 +3405,7 @@ export interface StatusLineSettings {
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];
 	segmentOptions: Record<string, unknown>;
+	transparentBg: boolean;
 }
 
 export interface ThinkingBudgetsSettings {

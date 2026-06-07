@@ -38,6 +38,7 @@ export interface StatusLineSettings {
 	segmentOptions?: StatusLineSegmentOptions;
 	showHookStatus?: boolean;
 	sessionAccent?: boolean;
+	transparentBg?: boolean;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -198,6 +199,7 @@ export class StatusLineComponent implements Component {
 			separator: settings.get("statusLine.separator"),
 			showHookStatus: settings.get("statusLine.showHookStatus"),
 			segmentOptions: settings.getGroup("statusLine").segmentOptions,
+			transparentBg: settings.get("statusLine.transparentBg"),
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 		};
 	}
@@ -634,10 +636,9 @@ export class StatusLineComponent implements Component {
 	#buildStatusLine(width: number): string {
 		const ctx = this.#buildSegmentContext(width);
 		const effectiveSettings = this.#resolveSettings();
-		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
-
-		const bgAnsi = theme.getBgAnsi("statusLineBg");
+		const bgAnsi = effectiveSettings.transparentBg ? "" : theme.getBgAnsi("statusLineBg");
 		const fgAnsi = theme.getFgAnsi("text");
+		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
 
 		// Collect visible segment contents
