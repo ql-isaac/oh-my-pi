@@ -2470,3 +2470,13 @@ export const github = {
 		return result.stdout;
 	},
 };
+
+// ════════════════════════════════════════════════════════════════════════════
+// Fork-local re-exports
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The implementations live in sibling modules so that pulling upstream changes
+// into this file does not conflict with them. Re-exporting here keeps the
+// existing import surface (`import { rebase } from "../utils/git"`) working.
+export { rebase } from "./git-rebase";
+export { stashDrop } from "./stash-drop";

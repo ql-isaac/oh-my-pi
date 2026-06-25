@@ -1,5 +1,8 @@
 /**
  * Check for and install updates.
+ *
+ * Source installs (git clones) detect the clone and update via rebase onto the
+ * upstream remote branch automatically.
  */
 import { Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import * as pluginCli from "../cli/plugin-cli";
@@ -7,17 +10,30 @@ import * as updateCli from "../cli/update-cli";
 import { initTheme } from "../modes/theme/theme";
 
 export default class Update extends Command {
-	static description = "Check for and install updates";
+	static description = "Check for and install updates (source installs: git-based)";
 
 	static flags = {
-		force: Flags.boolean({ char: "f", description: "Force update", default: false }),
-		check: Flags.boolean({ char: "c", description: "Check for updates without installing", default: false }),
-		plugins: Flags.boolean({ char: "l", description: "Update installed plugins", default: false }),
+		force: Flags.boolean({
+			char: "f",
+			description: "Force update",
+			default: false,
+		}),
+		check: Flags.boolean({
+			char: "c",
+			description: "Check for updates without installing",
+			default: false,
+		}),
+		plugins: Flags.boolean({
+			char: "l",
+			description: "Update installed plugins",
+			default: false,
+		}),
 	};
 
 	static examples = [
 		"omp update",
 		"omp update --check",
+		"omp update --force",
 		"# If GitHub rate-limits release metadata, set GITHUB_TOKEN or GH_TOKEN\n  GITHUB_TOKEN=... omp update",
 	];
 

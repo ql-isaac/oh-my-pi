@@ -15,6 +15,7 @@ import { $ } from "bun";
 import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
+import { detectGitTarget, runGitUpdate } from "./pull-cli";
 
 const REPO = "can1357/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
@@ -1147,6 +1148,13 @@ export async function updateViaBinaryAt(
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
+	// Source installs (git clones) are handled by the git-based update flow;
+	// detect and delegate when we are in a recognised clone.
+	const gitTarget = await detectGitTarget();
+	if (gitTarget) {
+		await runGitUpdate(gitTarget, opts);
+		return;
+	}
 	console.log(chalk.dim(`Current version: ${VERSION}`));
 
 	// Check for updates
