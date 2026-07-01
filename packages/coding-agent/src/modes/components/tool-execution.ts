@@ -15,6 +15,7 @@ import {
 	type TUI,
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
@@ -1008,6 +1009,10 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			// Custom tools use Box for flexible component rendering
 			this.#contentBox.setBgFn(undefined);
 			this.#contentBox.clear();
+			const intent = this.#getIntent();
+			if (intent) {
+				this.#contentBox.addChild(new Text(theme.fg("muted", ` # ${intent}`), 0, 0));
+			}
 			// Mirror the built-in renderer branch so custom renderers (notably the
 			// task tool, whose live instance routes through here) receive the same
 			// render context — e.g. the `hasResult` flag that suppresses the task
@@ -1111,6 +1116,10 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				// Multi-file: render each file as its own Box (identical to separate tool calls)
 				this.#contentBox.setBgFn(undefined);
 				this.#contentBox.clear();
+				const intent = this.#getIntent();
+				if (intent) {
+					this.#contentBox.addChild(new Text(theme.fg("muted", ` # ${intent}`), 0, 0));
+				}
 
 				const renderContext = this.#buildRenderContext();
 				this.#renderState.renderContext = renderContext;
@@ -1170,6 +1179,10 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				// Inline renderers skip background styling
 				this.#contentBox.setBgFn(undefined);
 				this.#contentBox.clear();
+				const intent = this.#getIntent();
+				if (intent) {
+					this.#contentBox.addChild(new Text(theme.fg("muted", ` # ${intent}`), 0, 0));
+				}
 
 				const renderContext = this.#buildRenderContext();
 				this.#renderState.renderContext = renderContext;
@@ -1278,6 +1291,36 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 			}
 		}
 		this.#renderedImageCount = this.#imageComponents.length;
+	}
+
+	#cachedIntent?: string;
+
+	#getIntent(): string | undefined {
+		const args = this.#args;
+		if (args && typeof args === "object" && typeof args[INTENT_FIELD] === "string") {
+			const trimmed = args[INTENT_FIELD].trim();
+			if (trimmed) {
+				this.#cachedIntent = trimmed;
+				return trimmed;
+			}
+		}
+		// Fallback: during streaming, the first delta may be too short for
+		// parseStreamingJson to extract "i" (e.g. {"i parses as {}).
+		// Extract it directly from the raw partial JSON string.
+		const partialJson = args?.__partialJson;
+		if (typeof partialJson === "string") {
+			const match = partialJson.match(/"i"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+			if (match) {
+				const trimmed = match[1].trim();
+				if (trimmed) {
+					this.#cachedIntent = trimmed;
+					return trimmed;
+				}
+			}
+		}
+		// tool_execution_start replaces args with the stripped version (i removed),
+		// so fall back to the cached intent captured from an earlier streaming delta.
+		return this.#cachedIntent;
 	}
 
 	#getCallArgsForRender(): any {

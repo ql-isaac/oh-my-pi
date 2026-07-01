@@ -1366,6 +1366,7 @@ interface RenderSignature {
 	paddingX: number;
 	paddingY: number;
 	codeBlockIndent: number;
+	linePrefix: string;
 	themeId: number;
 	defaultTextStyleId: number;
 	imageProtocol: string;
@@ -1414,6 +1415,8 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 	#defaultStylePrefix?: string;
 	/** Number of spaces used to indent code block content. */
 	#codeBlockIndent: number;
+	/** Optional prefix prepended to every rendered line (after padding, before content). */
+	#linePrefix?: string;
 
 	// Cache for rendered output. Cached arrays are shared and returned by
 	// reference (render contract: results are component-owned and immutable to
@@ -1477,6 +1480,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 		theme: MarkdownTheme,
 		defaultTextStyle?: DefaultTextStyle,
 		codeBlockIndent: number = 2,
+		linePrefix?: string,
 	) {
 		this.#text = normalizeOsc8Terminators(text);
 		this.#paddingX = paddingX;
@@ -1484,6 +1488,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 		this.#theme = theme;
 		this.#defaultTextStyle = defaultTextStyle;
 		this.#codeBlockIndent = Math.max(0, Math.floor(codeBlockIndent));
+		this.#linePrefix = linePrefix;
 	}
 
 	setText(text: string): boolean {
@@ -1743,6 +1748,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 			paddingX,
 			paddingY: this.#paddingY,
 			codeBlockIndent: this.#codeBlockIndent,
+			linePrefix: this.#linePrefix ?? "",
 			themeId: objectId(this.#theme),
 			defaultTextStyleId: this.#defaultTextStyle ? objectId(this.#defaultTextStyle) : -1,
 			imageProtocol: TERMINAL.imageProtocol ?? "",
@@ -1754,7 +1760,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.linePrefix}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -1852,6 +1858,7 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 		if (cache.paddingX !== signature.paddingX) return undefined;
 		if (cache.paddingY !== signature.paddingY) return undefined;
 		if (cache.codeBlockIndent !== signature.codeBlockIndent) return undefined;
+		if (cache.linePrefix !== signature.linePrefix) return undefined;
 		if (cache.themeId !== signature.themeId) return undefined;
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return undefined;
 		if (cache.imageProtocol !== signature.imageProtocol) return undefined;
@@ -1957,10 +1964,14 @@ export class Markdown implements Component, NativeScrollbackCommittedRows, Nativ
 
 			previousLineWasOsc66 = false;
 			if (literalCodeRow) {
-				contentLines.push(line);
+				// Literal code rows skip margin padding and background fill, but
+				// still honor the optional line prefix (e.g. a left "thinking"
+				// border) so thinking traces render consistently with their
+				// non-code surroundings.
+				contentLines.push((this.#linePrefix ?? "") + line);
 				continue;
 			}
-			const lineWithMargins = leftMargin + line + rightMargin;
+			const lineWithMargins = leftMargin + (this.#linePrefix ?? "") + line + rightMargin;
 
 			if (bgFn) {
 				contentLines.push(applyBackgroundToLine(lineWithMargins, signature.width, bgFn));

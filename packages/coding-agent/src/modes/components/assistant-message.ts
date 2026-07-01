@@ -887,11 +887,11 @@ export class AssistantMessageComponent extends Container {
 							(c.type === "thinking" && resolveThinkingDisplay(c, this.proseOnlyThinking).visible),
 					);
 
-				// Thinking traces in thinkingText color, italic
+				// Thinking traces in thinkingText color, italic, with left border
 				const md = new Markdown(thinkingText, 1, 0, getMarkdownTheme(), {
 					color: (text: string) => theme.fg("thinkingText", text),
 					italic: true,
-				});
+				}, 2, theme.fg("thinkingText", "│ "));
 				md.transientRenderCache = this.#lastUpdateTransient;
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "thinking", lastText: thinkingText });
