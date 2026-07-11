@@ -1,0 +1,369 @@
+/* Layout overrides for web mode. All transcript/shell/tool styles come from
+ * collab-web's built-in CSS (imported in main.tsx). Only web-mode-specific
+ * overrides and the connect screen live here. */
+
+/* ---- App layout ---- */
+
+.sh-app {
+	height: 100%;
+}
+
+/* ---- Main content area ---- */
+
+.sh-main {
+	height: 100%;
+	overflow: hidden;
+	display: flex;
+	flex-direction: column;
+}
+
+.sh-content {
+	flex: 1 1 auto;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	/* Centre the transcript column (max-width 880px) on wide viewports. The
+	 * composer's `.sh-composer-inner` is already capped at the same width
+	 * inside collab-web's shell.css, so this keeps the two columns visually
+	 * aligned. */
+	align-items: center;
+}
+
+.sh-transcript {
+	flex: 1 1 auto;
+	width: 100%;
+	max-width: 880px;
+}
+
+/* ---- Header ---- */
+
+.sh-header {
+	flex-shrink: 0;
+}
+
+/* ---- Banner ---- */
+
+.sh-banner {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 10px;
+	padding: 8px 12px;
+	font-size: 12px;
+	background: var(--bg-inset);
+	border-bottom: 1px solid var(--border);
+}
+
+.sh-banner-error {
+	color: var(--err);
+	background: color-mix(in srgb, var(--err) 12%, transparent);
+	border-bottom-color: color-mix(in srgb, var(--err) 30%, transparent);
+}
+
+/* ---- Connect screen ---- */
+
+.sh-connect {
+	height: 100%;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+}
+
+.sh-connect-card {
+	width: 100%;
+	max-width: 380px;
+	padding: 24px;
+}
+
+.sh-connect-head {
+	margin-bottom: 12px;
+}
+
+.sh-connect-head h2 {
+	margin: 8px 0 0;
+	font-size: 16px;
+}
+
+.sh-connect-sub {
+	margin: 4px 0 0;
+	font-size: 12px;
+	color: var(--fg-muted);
+	word-break: break-all;
+}
+
+.sh-connect-error {
+	font-size: 12px;
+	color: var(--err);
+}
+
+.sh-lockup-mark {
+	font-size: 40px;
+}
+
+/* ---- Session picker ---- */
+
+.sh-picker-card {
+	max-width: 680px;
+	width: 100%;
+	padding: 24px 24px 20px;
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.sh-picker-card .sh-connect-head h2 {
+	margin: 6px 0 0;
+	font-size: 18px;
+	font-weight: 600;
+	letter-spacing: -0.01em;
+}
+
+.sh-picker-actions {
+	display: flex;
+	gap: 8px;
+	margin: 16px 0;
+}
+
+/* Ghost button — reuses the sh-btn primitive from collab-web but stays muted so
+ * "refresh" doesn't compete visually with the primary "new session" CTA. */
+.sh-btn-ghost {
+	background: transparent;
+	color: var(--fg-muted);
+	border-color: var(--border-strong);
+}
+
+.sh-btn-ghost:hover:not(:disabled) {
+	color: var(--fg);
+	background: var(--bg-overlay);
+}
+
+.sh-btn-danger {
+	color: var(--err);
+	border-color: color-mix(in srgb, var(--err) 35%, var(--border-strong));
+	background: color-mix(in srgb, var(--err) 8%, transparent);
+}
+
+.sh-btn-danger:hover:not(:disabled) {
+	color: var(--err);
+	background: color-mix(in srgb, var(--err) 14%, transparent);
+	border-color: color-mix(in srgb, var(--err) 50%, var(--border-strong));
+}
+
+.sh-picker-error {
+	background: color-mix(in srgb, var(--err) 12%, transparent);
+	border: 1px solid color-mix(in srgb, var(--err) 25%, transparent);
+	border-radius: var(--radius);
+	padding: 8px 12px;
+	margin-bottom: 12px;
+	color: var(--err);
+	font-size: 12px;
+}
+
+.sh-picker-empty {
+	text-align: center;
+	color: var(--fg-muted);
+	padding: 24px 0;
+	border: 1px dashed var(--border);
+	border-radius: var(--radius);
+	margin-bottom: 4px;
+}
+
+.sh-picker-empty-title {
+	font-size: 13px;
+	color: var(--fg-faint);
+}
+
+.sh-picker-empty-sub {
+	font-size: 11px;
+	margin-top: 4px;
+	color: var(--fg-faint);
+}
+
+.sh-picker-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	max-height: 60vh;
+	overflow-y: auto;
+	/* Pull the list out of the card padding so rows can be full-width. */
+	margin: 0 -4px;
+	padding: 0 4px;
+}
+
+.sh-picker-group {
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--fg-faint);
+	padding: 14px 6px 6px;
+	font-weight: 600;
+}
+
+.sh-picker-row {
+	display: flex;
+	align-items: stretch;
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	overflow: hidden;
+	transition: background 80ms ease, border-color 80ms ease;
+}
+
+.sh-picker-row:hover {
+	background: var(--bg-overlay);
+	border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.sh-picker-row-main {
+	flex: 1 1 auto;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+	padding: 10px 12px;
+	background: transparent;
+	border: none;
+	color: inherit;
+	text-align: left;
+	cursor: pointer;
+	font: inherit;
+}
+
+.sh-picker-row-main:disabled {
+	cursor: not-allowed;
+	opacity: 0.5;
+}
+
+.sh-picker-row-main:focus-visible {
+	outline: none;
+	background: var(--bg-overlay);
+	box-shadow: inset 0 0 0 2px var(--ring);
+}
+
+.sh-picker-title-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+
+.sh-picker-title {
+	font-size: 13px;
+	font-weight: 500;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
+	flex: 1 1 auto;
+}
+
+.sh-picker-meta {
+	font-size: 11px;
+	color: var(--fg-muted);
+	font-variant-numeric: tabular-nums;
+}
+
+/* Status pill — same labels TUI uses, with a tone for quick scanning. */
+.sh-pill {
+	display: inline-flex;
+	align-items: center;
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.04em;
+	padding: 1px 6px;
+	border-radius: 999px;
+	border: 1px solid var(--border);
+	color: var(--fg-muted);
+	background: var(--bg-overlay);
+	text-transform: lowercase;
+	white-space: nowrap;
+}
+
+.sh-pill-ok {
+	color: var(--ok);
+	border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+	background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
+
+.sh-pill-warn {
+	color: var(--warn);
+	border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
+	background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.sh-pill-err {
+	color: var(--err);
+	border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+	background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+.sh-pill-muted {
+	color: var(--fg-faint);
+}
+
+/* Delete affordance — sits in a gutter on the right of the row; reveals on
+ * hover for desktop, always visible on touch devices. */
+.sh-picker-row-delete {
+	flex: 0 0 auto;
+	width: 32px;
+	background: transparent;
+	border: none;
+	border-left: 1px solid var(--border);
+	color: var(--fg-faint);
+	font-size: 18px;
+	line-height: 1;
+	cursor: pointer;
+	transition: color 80ms ease, background 80ms ease;
+	opacity: 0.5;
+}
+
+.sh-picker-row:hover .sh-picker-row-delete,
+.sh-picker-row-delete:focus-visible {
+	opacity: 1;
+}
+
+.sh-picker-row-delete:hover:not(:disabled) {
+	color: var(--err);
+	background: color-mix(in srgb, var(--err) 10%, transparent);
+}
+
+.sh-picker-row-delete:disabled {
+	cursor: not-allowed;
+	opacity: 0.2;
+}
+
+/* Inline confirm — replaces the row content with a Yes/No prompt. Matches the
+ * TUI's "Delete session? Yes/No" pattern but stays in the row slot so the user
+ * keeps their scroll position and the surrounding context. */
+.sh-picker-confirm {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	padding: 10px 12px;
+	background: color-mix(in srgb, var(--err) 8%, var(--bg-raised));
+	border: 1px solid color-mix(in srgb, var(--err) 30%, var(--border));
+	border-radius: var(--radius);
+}
+
+.sh-picker-confirm-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-size: 13px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.sh-picker-confirm-text strong {
+	font-weight: 600;
+}
+
+.sh-picker-confirm-actions {
+	flex: 0 0 auto;
+	display: flex;
+	gap: 6px;
+}

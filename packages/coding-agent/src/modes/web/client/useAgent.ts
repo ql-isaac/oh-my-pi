@@ -1,0 +1,355 @@
+/**
+ * React hook that consumes collab HostFrame messages over WebSocket.
+ */
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { HostFrame, SessionEntry, SessionState, AgentEvent, AssistantMessage, ActiveTool } from "@oh-my-pi/pi-wire";
+
+export type ConnectionPhase = "connecting" | "selecting" | "live" | "reconnecting" | "ended";
+
+export interface SessionListItem {
+	path: string;
+	id: string;
+	cwd: string;
+	title: string;
+	created: number;
+	modified: number;
+	messageCount: number;
+	firstMessage: string;
+	status?: string;
+}
+
+export interface SessionListPayload {
+	local: SessionListItem[];
+	all: SessionListItem[];
+	cwd: string;
+}
+
+export interface UseAgentReturn {
+	phase: ConnectionPhase;
+	endedReason: string | null;
+	entries: readonly SessionEntry[];
+	stream: AssistantMessage | null;
+	streamDone: boolean;
+	activeTools: ReadonlyMap<string, ActiveTool>;
+	working: boolean;
+	state: SessionState | null;
+	sessionList: SessionListPayload | null;
+	sessionListError: string | null;
+	switching: boolean;
+	sendPrompt: (text: string) => void;
+	abort: () => void;
+	reconnect: () => void;
+	selectSession: (path: string) => void;
+	newSession: () => void;
+	refreshSessionList: () => void;
+	deleteSession: (path: string) => Promise<boolean>;
+}
+
+function wsUrl(): string {
+	const proto = location.protocol === "https:" ? "wss:" : "ws:";
+	return `${proto}//${location.host}/ws`;
+}
+
+export function useAgent(): UseAgentReturn {
+	const wsRef = useRef<WebSocket | null>(null);
+	const reconnectRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+	const pendingChunks = useRef<SessionEntry[]>([]);
+	const chunkFinalRef = useRef(false);
+
+	const [phase, setPhase] = useState<ConnectionPhase>("connecting");
+	const [endedReason, setEndedReason] = useState<string | null>(null);
+	const [entries, setEntries] = useState<readonly SessionEntry[]>([]);
+	const [stream, setStream] = useState<AssistantMessage | null>(null);
+	// Mirrors `streamDone` so the WebSocket onmessage closure (built once in
+	// `connect`) can read the live value. The setter updates both - keeping the
+	// ref in sync inside the call site avoids a render-boundary race where the
+	// next message arrives before React commits the state change.
+	const streamDoneRef = useRef(false);
+	const [streamDone, setStreamDoneState] = useState(false);
+	const setStreamDone = useCallback((d: boolean) => {
+		streamDoneRef.current = d;
+		setStreamDoneState(d);
+	}, []);
+	const [activeTools, setActiveTools] = useState<ReadonlyMap<string, ActiveTool>>(new Map());
+	const [working, setWorking] = useState(false);
+	const [state, setState] = useState<SessionState | null>(null);
+	const [sessionList, setSessionList] = useState<SessionListPayload | null>(null);
+	const [sessionListError, setSessionListError] = useState<string | null>(null);
+	/** Set while a `resume`/`new` is in flight; picker is disabled until the
+	 *  server's `reset`+welcome completes. */
+	const [switching, setSwitching] = useState(false);
+
+	// Reset the transcript back to a clean slate. Called on `reset` frames from
+	// the server (signals an imminent session switch) and never from anywhere
+	// else - the live event path is the only other writer to entries/stream.
+	const resetLocal = useCallback(() => {
+		setEntries([]);
+		setStream(null);
+		setStreamDone(false);
+		streamDoneRef.current = false;
+		setActiveTools(new Map());
+		setWorking(false);
+		pendingChunks.current = [];
+		chunkFinalRef.current = false;
+	}, []);
+
+	const connect = useCallback(() => {
+		if (wsRef.current?.readyState === WebSocket.OPEN) return;
+		setPhase("connecting");
+		setEndedReason(null);
+		resetLocal();
+		setSwitching(false);
+		pendingChunks.current = [];
+		chunkFinalRef.current = false;
+
+		const ws = new WebSocket(wsUrl());
+		wsRef.current = ws;
+
+		ws.onopen = () => {
+			// Land in the picker first; the server emits a welcome only after
+			// the user picks a session. If they want a fresh one, they hit
+			// "new session" - the server then resets and welcomes.
+			setPhase("selecting");
+			fetchSessionList();
+		};
+		ws.onmessage = (event) => {
+			let frame: HostFrame;
+			try {
+				frame = JSON.parse(event.data) as HostFrame;
+			} catch {
+				return;
+			}
+
+			switch (frame.t) {
+				case "snapshot-chunk": {
+					pendingChunks.current.push(...frame.entries);
+					if (frame.final) chunkFinalRef.current = true;
+					break;
+				}
+				case "welcome": {
+					// chunkFinalRef tracks whether the snapshot stream is complete.
+					// resetLocal() clears it; the trailing snapshot-chunk with
+					// `final: true` re-arms it. When set, pendingChunks holds the
+					// entire new transcript and we replace entries wholesale -
+					// no prev-merge, no length guard: under React 18's auto
+					// batching, multiple setState calls in one tick see a stale
+					// `prev`, so any conditional skip silently drops the new
+					// transcript when a prior session had populated entries.
+					if (chunkFinalRef.current) {
+						const queued = pendingChunks.current;
+						pendingChunks.current = [];
+						chunkFinalRef.current = false;
+						setEntries(Object.freeze(queued));
+					}
+					setState(frame.state);
+					setWorking(frame.state.isStreaming);
+					// Server has accepted our session pick and shipped the snapshot;
+					// move out of the picker.
+					setPhase("live");
+					setSwitching(false);
+					break;
+				}
+				// Web-mode-only frame: server is tearing down the current session
+				// in response to a `resume`/`new` from this client. Drop every
+				// in-flight UI hint (stream ghost, active tools, queued chunks)
+				// so the upcoming welcome seeds a clean transcript.
+				case "reset": {
+					resetLocal();
+					setSwitching(true);
+					setPhase("selecting");
+					break;
+				}
+				case "entry": {
+					setEntries(prev => Object.freeze([...prev, frame.entry]));
+					// streamDoneRef (not the captured `streamDone` state - that's
+					// pinned to `false` in this closure) reflects whether the
+					// message_end event already set a streaming ghost. When the
+					// entry lands, drop the ghost so the entry owns the row.
+					if (
+						streamDoneRef.current &&
+						frame.entry.type === "message" &&
+						frame.entry.message.role === "assistant"
+					) {
+						setStream(null);
+						setStreamDone(false);
+					}
+					break;
+				}
+				case "event": {
+					handleEvent(frame.event, {
+						setStream, setStreamDone, setActiveTools, setWorking, setState,
+					});
+					break;
+				}
+				case "state": {
+					setState(frame.state);
+					if (!frame.state.isStreaming) {
+						setWorking(false);
+						if (streamDoneRef.current) {
+							setStream(null);
+							setStreamDone(false);
+						}
+					}
+					break;
+				}
+				case "error": {
+					// Server-side failure (e.g. session switch rejected). Release the
+					// stuck switching lock so the picker is interactive again.
+					setSwitching(false);
+					setSessionListError(frame.message ?? "unknown error");
+					break;
+				}
+				case "bye": {
+					setPhase("ended");
+					setEndedReason(frame.reason);
+					break;
+				}
+			}
+		};
+
+		ws.onerror = () => { setPhase("reconnecting"); };
+		ws.onclose = () => {
+			setPhase("reconnecting");
+			if (wsRef.current === ws) wsRef.current = null;
+			reconnectRef.current = setTimeout(() => {
+				if (wsRef.current) return;
+				connect();
+			}, 2000);
+		};
+	}, []);
+
+	const sendGuestFrame = useCallback((frame: Record<string, unknown>) => {
+		wsRef.current?.send(JSON.stringify(frame));
+	}, []);
+
+	const sendPrompt = useCallback((text: string) => {
+		sendGuestFrame({ t: "prompt", text });
+	}, [sendGuestFrame]);
+
+	const abort = useCallback(() => {
+		sendGuestFrame({ t: "abort" });
+	}, [sendGuestFrame]);
+
+	const fetchSessionList = useCallback(async () => {
+		setSessionListError(null);
+		try {
+			const res = await fetch("/api/sessions");
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const data = (await res.json()) as SessionListPayload;
+			setSessionList(data);
+		} catch (e) {
+			setSessionListError(e instanceof Error ? e.message : String(e));
+		}
+	}, []);
+
+	const selectSession = useCallback((path: string) => {
+		if (switching) return;
+		setSwitching(true);
+		sendGuestFrame({ t: "resume", path });
+	}, [sendGuestFrame, switching]);
+
+	const newSession = useCallback(() => {
+		if (switching) return;
+		setSwitching(true);
+		sendGuestFrame({ t: "new" });
+	}, [sendGuestFrame, switching]);
+
+	const deleteSession = useCallback(async (path: string): Promise<boolean> => {
+		try {
+			const res = await fetch("/api/sessions/delete", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ path }),
+			});
+			const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+			if (!res.ok || !data.ok) {
+				setSessionListError(data.error ?? `HTTP ${res.status}`);
+				return false;
+			}
+			// Refresh the list so the deleted row disappears; preserves order/filtering.
+			await fetchSessionList();
+			return true;
+		} catch (e) {
+			setSessionListError(e instanceof Error ? e.message : String(e));
+			return false;
+		}
+	}, [fetchSessionList]);
+
+	useEffect(() => {
+		connect();
+		return () => {
+			clearTimeout(reconnectRef.current);
+			wsRef.current?.close();
+		};
+	}, [connect]);
+
+	const reconnect = useCallback(() => {
+		wsRef.current?.close();
+		wsRef.current = null;
+		connect();
+	}, [connect]);
+
+	return {
+		phase, endedReason, entries, stream, streamDone, activeTools, working, state,
+		sessionList, sessionListError, switching,
+		sendPrompt, abort, reconnect, selectSession, newSession, refreshSessionList: fetchSessionList,
+		deleteSession,
+	};
+}
+
+function handleEvent(
+	event: AgentEvent,
+	ctx: {
+		setStream: (s: AssistantMessage | null) => void;
+		setStreamDone: (d: boolean) => void;
+		setActiveTools: (cb: (prev: Map<string, ActiveTool>) => Map<string, ActiveTool>) => void;
+		setWorking: (w: boolean) => void;
+		setState: (s: SessionState | ((prev: SessionState | null) => SessionState | null)) => void;
+	},
+): void {
+	switch (event.type) {
+		case "message_start":
+		case "message_update":
+			if (event.message.role === "assistant") {
+				ctx.setStream(event.message);
+				ctx.setStreamDone(false);
+			}
+			break;
+		case "message_end":
+			if (event.message.role === "assistant") {
+				ctx.setStream(event.message);
+				ctx.setStreamDone(true);
+			}
+			break;
+		case "tool_execution_start":
+			ctx.setActiveTools(prev => new Map(prev).set(event.toolCallId, {
+				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				args: event.args,
+				intent: event.intent,
+				startedAt: Date.now(),
+			}));
+			break;
+		case "tool_execution_update":
+			ctx.setActiveTools(prev => {
+				const existing = prev.get(event.toolCallId);
+				if (!existing) return prev;
+				return new Map(prev).set(event.toolCallId, { ...existing, partialResult: event.partialResult });
+			});
+			break;
+		case "tool_execution_end":
+			ctx.setActiveTools(prev => {
+				const next = new Map(prev);
+				next.delete(event.toolCallId);
+				return next;
+			});
+			break;
+		case "agent_start":
+			ctx.setWorking(true);
+			break;
+		case "agent_end":
+			ctx.setWorking(false);
+			break;
+	}
+}
