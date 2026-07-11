@@ -1,8 +1,11 @@
 {
-	"extends": "../tsconfig.workspace.json",
-	"include": [
-		"src",
-		"test",
-		"scripts"
-	]
+  "extends": "../tsconfig.workspace.json",
+  "include": [
+    "src",
+    "test",
+    "scripts"
+  ],
+  "exclude": [
+    "src/modes/web/client"
+  ]
 }

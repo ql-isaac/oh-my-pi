@@ -59,5 +59,20 @@
     "index.html",
     "README.md",
     "CHANGELOG.md"
-  ]
+  ],
+  "exports": {
+    "./transcript": "./src/components/transcript/Transcript.tsx",
+    "./header-bar": "./src/components/shell/HeaderBar.tsx",
+    "./composer": "./src/components/shell/Composer.tsx",
+    "./banners": "./src/components/shell/Banners.tsx",
+    "./toasts": "./src/components/shell/Toasts.tsx",
+    "./tool-render": "./src/tool-render/index.ts",
+    "./format": "./src/lib/format.ts",
+    "./guest-client": "./src/lib/client.ts",
+    "./tool-render-css": "./src/tool-render/tool-render.css",
+    "./transcript-css": "./src/components/transcript/transcript.css",
+    "./shell-css": "./src/components/shell/shell.css",
+    "./base-css": "./src/styles/base.css",
+    "./tokens-css": "./src/styles/tokens.css"
+  }
 }

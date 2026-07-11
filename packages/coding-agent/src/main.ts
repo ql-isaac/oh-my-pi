@@ -1204,7 +1204,7 @@ export async function runRootCommand(
 	// Classify the host before opening auth or settings storage so every
 	// session-critical database connection picks the right busy timeout.
 	// See getDbBusyTimeoutMs().
-	const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+	const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp" || mode === "web";
 	// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 	const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 	const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
@@ -1649,6 +1649,12 @@ export async function runRootCommand(
 			const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 			stopStartupWatchdog();
 			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
+		} else if (mode === "web") {
+			// Branch-only web server: keep web mode code out of normal interactive startup.
+			stopStartupWatchdog();
+			const { runWebMode, parseWebModeArgs } = await import("./modes/web/web-mode");
+			const webOpts = parseWebModeArgs(rawArgs);
+			await runWebMode(session, webOpts);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const startupChangelog = await logger.time(
