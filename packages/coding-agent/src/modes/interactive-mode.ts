@@ -55,6 +55,7 @@ import {
 import chalk from "chalk";
 import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
+import type { WebGuestLink } from "./web/web-guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
@@ -552,6 +553,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	webGuest?: WebGuestLink;
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;

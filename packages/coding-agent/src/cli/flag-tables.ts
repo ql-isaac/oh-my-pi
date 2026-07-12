@@ -228,6 +228,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			});
 		}
 	},
+	"--web-client": (result, value) => {
+		result.webClient = value;
+	},
 };
 
 /**

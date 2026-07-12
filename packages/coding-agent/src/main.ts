@@ -422,6 +422,7 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
+	webClient?: string,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -503,7 +504,20 @@ async function runInteractiveMode(
 		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
-	if (initialMessage !== undefined) {
+	// `omp --web-client <url>`: attach TUI to a running web mode server.
+	// Creates a WebGuestLink that bridges the TUI's EventController to the
+	// server's WebSocket, enabling bidirectional real-time sync between
+	// the TUI and browser Web UI.
+	if (webClient !== undefined) {
+		// Branch-only web client: keep web guest code out of normal interactive startup.
+		const { WebGuestLink } = await import("./modes/web/web-guest");
+		const guest = new WebGuestLink(mode, webClient);
+		const sessionPath = session.sessionManager.getSessionFile() ?? undefined;
+		using _keepalive = new EventLoopKeepalive();
+		await guest.connect(sessionPath);
+	}
+
+	if (initialMessage !== undefined && webClient === undefined) {
 		session.maybeStartTitleGeneration(initialMessage);
 		try {
 			using _keepalive = new EventLoopKeepalive();
@@ -515,6 +529,7 @@ async function runInteractiveMode(
 	}
 
 	for (const message of initialMessages) {
+		if (webClient !== undefined) break;
 		session.maybeStartTitleGeneration(message);
 		try {
 			using _keepalive = new EventLoopKeepalive();
@@ -1654,7 +1669,20 @@ export async function runRootCommand(
 			stopStartupWatchdog();
 			const { runWebMode, parseWebModeArgs } = await import("./modes/web/web-mode");
 			const webOpts = parseWebModeArgs(rawArgs);
-			await runWebMode(session, webOpts);
+			// Factory: creates independent AgentSession instances per session path.
+			// Each call opens the session file and creates a fresh AgentSession that
+			// can process prompts concurrently with other sessions.
+			webOpts.forkSession = async (sessionPath: string) => {
+				const mgr = await SessionManager.open(sessionPath, parsedArgs.sessionDir);
+				const { session: s } = await createSession({
+					...sessionOptions,
+					sessionManager: mgr,
+					eventBus: new EventBus(),
+					preloadedExtensions: extensionsResult,
+				});
+				return s;
+			};
+			await runWebMode(webOpts);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const startupChangelog = await logger.time(
@@ -1701,6 +1729,7 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				parsedArgs.join,
+				parsedArgs.webClient,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.

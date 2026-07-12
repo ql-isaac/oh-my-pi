@@ -3,6 +3,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
 import type { CollabGuestLink } from "../collab/guest";
+import type { WebGuestLink } from "./web/web-guest";
 import type { CollabHost } from "../collab/host";
 import type { KeybindingsManager } from "../config/keybindings";
 import type { Settings } from "../config/settings";
@@ -144,6 +145,8 @@ export interface InteractiveModeContext {
 	lspServers?: LspStartupServerInfo[];
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	/** Web mode guest: TUI attached to a running `omp --mode web` server. */
+	webGuest?: WebGuestLink;
 	eventController: EventController;
 	eventBus?: EventBus;
 

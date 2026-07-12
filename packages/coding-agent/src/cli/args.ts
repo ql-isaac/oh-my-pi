@@ -56,6 +56,8 @@ export interface Args {
 	fork?: string;
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
+	/** Web mode server URL to connect to as a TUI guest (e.g. "http://localhost:3000"). */
+	webClient?: string;
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;

@@ -356,6 +356,12 @@ export class InputController {
 				}
 				return;
 			}
+			if (this.ctx.webGuest) {
+				if (this.ctx.webGuest.state?.isStreaming || this.ctx.loadingAnimation) {
+					this.ctx.webGuest.sendAbort();
+				}
+				return;
+			}
 			if (this.ctx.loadingAnimation) {
 				if (this.ctx.cancelPendingSubmission()) {
 					return;
@@ -726,6 +732,16 @@ export class InputController {
 				// No local render: the prompt comes back from the host as a
 				// collab-prompt event/entry and renders with the author badge.
 				this.ctx.collabGuest.sendPrompt(text, images);
+				return;
+			}
+
+			// Web mode guest: prompts execute on the web server's AgentSession,
+			// which is the single source of truth. All text (including slash
+			// commands) goes through the WebSocket; the server handles everything.
+			if (this.ctx.webGuest) {
+				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
+				this.ctx.editor.clearDraft(text);
+				this.ctx.webGuest.sendPrompt(text, images);
 				return;
 			}
 
@@ -1131,6 +1147,10 @@ export class InputController {
 	async handleRetry(): Promise<void> {
 		if (this.ctx.collabGuest) {
 			this.ctx.showStatus("/retry is host-only during a collab session");
+			return;
+		}
+		if (this.ctx.webGuest) {
+			this.ctx.showStatus("/retry is host-only during a web session");
 			return;
 		}
 		const didRetry = await this.ctx.viewSession.retry();
