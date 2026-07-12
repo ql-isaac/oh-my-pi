@@ -377,7 +377,11 @@ export type HostFrame =
 	/** Targeted reply to fetch-transcript; `text` is decoded JSONL from `fromByte`, `newSize` the next offset base. */
 	| { t: "transcript"; reqId: number; text: string; newSize: number; error?: string }
 	| { t: "bye"; reason: string }
-	| { t: "error"; message: string };
+	| { t: "error"; message: string }
+	/** Web-mode extension: server is about to send a fresh snapshot. The
+	 *  client should clear all local transcript state before receiving
+	 *  the subsequent welcome + snapshot-chunk frames. */
+	| { t: "reset" };
 
 export type WireFrame = GuestFrame | HostFrame;
 
