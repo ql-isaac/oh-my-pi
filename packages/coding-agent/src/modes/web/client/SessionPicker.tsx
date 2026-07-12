@@ -3,9 +3,13 @@
  * in the TUI. Lists local + cross-project sessions with status badges, a
  * per-row delete action (with inline confirmation, matching the TUI's
  * "Delete session? Yes/No" dialog), and a "new session" entry point.
+ *
+ * Responsive: full-width card on mobile with touch-friendly 44px tap targets;
+ * compact centered card on desktop. The inline confirm prompt stacks
+ * vertically below 420px so the title and buttons never truncate.
  */
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode, type SVGProps } from "react";
 import type { SessionListItem, SessionListPayload } from "./useAgent";
 
 interface SessionPickerProps {
@@ -50,6 +54,54 @@ const STATUS_TONE: Record<string, string> = {
 	unknown: "muted",
 };
 
+/* ---- Icons (Lucide-style, 24x24 viewBox, stroke-based) ---- */
+
+const TrashIcon = (props: SVGProps<SVGSVGElement>): ReactNode => (
+	<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+		<polyline points="3 6 5 6 21 6" />
+		<path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+		<line x1="10" y1="11" x2="10" y2="17" />
+		<line x1="14" y1="11" x2="14" y2="17" />
+	</svg>
+);
+
+const PlusIcon = (props: SVGProps<SVGSVGElement>): ReactNode => (
+	<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+		<line x1="12" y1="5" x2="12" y2="19" />
+		<line x1="5" y1="12" x2="19" y2="12" />
+	</svg>
+);
+
+const RefreshIcon = (props: SVGProps<SVGSVGElement>): ReactNode => (
+	<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+		<polyline points="23 4 23 10 17 10" />
+		<polyline points="1 20 1 14 7 14" />
+		<path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+	</svg>
+);
+
+const InboxIcon = (props: SVGProps<SVGSVGElement>): ReactNode => (
+	<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>
+		<polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+		<path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+	</svg>
+);
+
+/* ---- Loading skeleton ---- */
+
+function SkeletonRows(): ReactNode {
+	return (
+		<ul className="sh-picker-list sh-picker-skeleton" aria-hidden="true">
+			{Array.from({ length: 5 }, (_, i) => (
+				<li key={i} className="sh-picker-skeleton-row">
+					<div className="sh-picker-skeleton-line" style={{ width: `${55 + (i % 3) * 14}%` }} />
+					<div className="sh-picker-skeleton-line sh-picker-skeleton-meta" style={{ width: `${30 + (i % 2) * 10}%` }} />
+				</li>
+			))}
+		</ul>
+	);
+}
+
 export function SessionPicker(props: SessionPickerProps): ReactNode {
 	const { list, error, loading, switching, cwd, onSelect, onNew, onRefresh, onDelete } = props;
 
@@ -74,11 +126,16 @@ export function SessionPicker(props: SessionPickerProps): ReactNode {
 		setDeleting(path);
 		try {
 			const ok = await onDelete(path);
-			if (ok) setConfirming(null);
+			// Only clear confirming if it still matches this row (prevents
+			// racing with another row's delete confirm UI).
+			setConfirming(prev => prev === path && ok ? null : prev);
 		} finally {
-			setDeleting(null);
+			setDeleting(prev => prev === path ? null : prev);
 		}
 	};
+
+	const showSkeleton = loading && rows.length === 0;
+	const showEmpty = !loading && !showSkeleton && rows.length === 0;
 
 	return (
 		<div className="sh-connect">
@@ -88,32 +145,41 @@ export function SessionPicker(props: SessionPickerProps): ReactNode {
 						<span className="sh-lockup-mark">{"\u{1F916}"}</span>
 					</div>
 					<h2>pick a session</h2>
-					<p className="sh-connect-sub">cwd: {cwd || "(unknown)"}</p>
+					<p className="sh-connect-sub">
+						<span className="sh-picker-cwd-label">cwd</span>
+						<code className="sh-picker-cwd">{cwd || "(unknown)"}</code>
+					</p>
 				</div>
 
 				<div className="sh-picker-actions">
 					<button
 						type="button"
-						className="sh-btn sh-btn-primary"
+						className="sh-btn sh-btn-primary sh-picker-btn-new"
 						onClick={onNew}
 						disabled={switching}
 					>
-						new session
+						<PlusIcon />
+						<span>new session</span>
 					</button>
 					<button
 						type="button"
-						className="sh-btn sh-btn-ghost"
+						className="sh-btn sh-btn-ghost sh-picker-btn-refresh"
 						onClick={onRefresh}
 						disabled={loading}
+						aria-label="Refresh session list"
 					>
-						{loading ? "refreshing..." : "refresh"}
+						<RefreshIcon className={loading ? "sh-icon-spin" : undefined} />
+						<span>{loading ? "refreshing" : "refresh"}</span>
 					</button>
 				</div>
 
 				{error && <div className="sh-picker-error">{error}</div>}
 
-				{!loading && rows.length === 0 && (
+				{showSkeleton && <SkeletonRows />}
+
+				{showEmpty && (
 					<div className="sh-picker-empty">
+						<InboxIcon className="sh-picker-empty-icon" />
 						<div className="sh-picker-empty-title">no saved sessions yet</div>
 						<div className="sh-picker-empty-sub">start one with the button above</div>
 					</div>
@@ -127,15 +193,19 @@ export function SessionPicker(props: SessionPickerProps): ReactNode {
 							const isConfirming = confirming === row.item.path;
 							const isDeleting = deleting === row.item.path;
 							const statusTone = row.item.status ? STATUS_TONE[row.item.status] ?? "muted" : null;
+							const title = row.item.title || row.item.firstMessage || "(untitled)";
 							return (
 								<li key={row.item.path}>
 									{showHeader && (
-										<div className="sh-picker-group">{row.group}</div>
+									<div className="sh-picker-group"><span className="sh-picker-group-text">{row.group}</span></div>
 									)}
 									{isConfirming ? (
-										<div className="sh-picker-confirm" role="alertdialog" aria-label="Confirm delete">
+										// Inline confirm - not a modal dialog, so no alertdialog role.
+										// role="group" + aria-label gives screen readers context without
+										// implying focus trapping that alertdialog requires.
+										<div className="sh-picker-confirm" role="group" aria-label={`Confirm delete: ${title}`}>
 											<div className="sh-picker-confirm-text">
-												delete <strong>{row.item.title || row.item.firstMessage || "(untitled)"}</strong>?
+												delete <strong>{title}</strong>?
 											</div>
 											<div className="sh-picker-confirm-actions">
 												<button
@@ -152,7 +222,7 @@ export function SessionPicker(props: SessionPickerProps): ReactNode {
 													onClick={() => void confirmDelete(row.item.path)}
 													disabled={isDeleting}
 												>
-													{isDeleting ? "deleting..." : "delete"}
+													{isDeleting ? "deleting" : "delete"}
 												</button>
 											</div>
 										</div>
@@ -165,24 +235,30 @@ export function SessionPicker(props: SessionPickerProps): ReactNode {
 												onClick={() => onSelect(row.item.path)}
 											>
 												<div className="sh-picker-title-row">
-													<span className="sh-picker-title">{row.item.title || row.item.firstMessage || "(untitled)"}</span>
+													<span className="sh-picker-title">{title}</span>
 													{statusTone && row.item.status && (
-														<span className={`sh-pill sh-pill-${statusTone}`}>{row.item.status}</span>
+														<span className={`sh-pill sh-pill-${statusTone}`}>
+															<span className="sh-pill-dot" aria-hidden="true" />
+															{row.item.status}
+														</span>
 													)}
 												</div>
-												<span className="sh-picker-meta">
-													{row.item.messageCount} msg · {formatTimeAgo(row.item.modified)}
-												</span>
+												<div className="sh-picker-meta">
+													{row.isLocal && <span className="sh-picker-local-tag">this project</span>}
+													<span>{row.item.messageCount} msg</span>
+													<span className="sh-picker-meta-sep" aria-hidden="true">{"\u00B7"}</span>
+													<span>{formatTimeAgo(row.item.modified)}</span>
+												</div>
 											</button>
 											<button
 												type="button"
 												className="sh-picker-row-delete"
 												disabled={switching}
-												aria-label="Delete session"
+												aria-label={`Delete session: ${title}`}
 												title="Delete this session"
 												onClick={() => setConfirming(row.item.path)}
 											>
-												×
+												<TrashIcon />
 											</button>
 										</div>
 									)}

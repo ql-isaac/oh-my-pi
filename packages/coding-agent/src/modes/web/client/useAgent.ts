@@ -51,7 +51,7 @@ function wsUrl(): string {
 	return `${proto}//${location.host}/ws`;
 }
 
-export function useAgent(): UseAgentReturn {
+export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 	const wsRef = useRef<WebSocket | null>(null);
 	const reconnectRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 	const pendingChunks = useRef<SessionEntry[]>([]);
@@ -79,7 +79,7 @@ export function useAgent(): UseAgentReturn {
 	/** Set while a `resume`/`new` is in flight; picker is disabled until the
 	 *  server's `reset`+welcome completes. */
 	const [switching, setSwitching] = useState(false);
-
+	const initialId = opts?.initialSessionId;
 	// Reset the transcript back to a clean slate. Called on `reset` frames from
 	// the server (signals an imminent session switch) and never from anywhere
 	// else - the live event path is the only other writer to entries/stream.
@@ -275,6 +275,22 @@ export function useAgent(): UseAgentReturn {
 			return false;
 		}
 	}, [fetchSessionList]);
+
+	// If the user navigated directly to /session/<id>, resolve the ID from the
+	// session list and auto-switch to that session once the list arrives.
+	const [initialIdResolved, setInitialIdResolved] = useState(false);
+
+	useEffect(() => {
+		if (!initialId || initialIdResolved) return;
+		if (phase !== "selecting" || switching || !sessionList) return;
+		// Try local sessions first, then all sessions
+		const match = sessionList.local.find(s => s.id.startsWith(initialId))
+			?? sessionList.all.find(s => s.id.startsWith(initialId));
+		if (match) {
+			setInitialIdResolved(true);
+			selectSession(match.path);
+		}
+	}, [initialId, initialIdResolved, phase, switching, sessionList, selectSession]);
 
 	useEffect(() => {
 		connect();

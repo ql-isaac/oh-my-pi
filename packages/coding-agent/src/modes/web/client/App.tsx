@@ -1,5 +1,4 @@
-import type { ReactNode } from "react";
-import { useMemo } from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
 import { useAgent } from "./useAgent";
 import { buildSnapshot, buildGuestClient } from "./collab-bridge";
 import { SessionPicker } from "./SessionPicker";
@@ -9,10 +8,29 @@ import { HeaderBar } from "@oh-my-pi/collab-web/header-bar";
 import { Composer } from "@oh-my-pi/collab-web/composer";
 import { Banners } from "@oh-my-pi/collab-web/banners";
 
-export function App(): ReactNode {
-	const agent = useAgent();
+export function App({ initialSessionId }: { initialSessionId?: string }): ReactNode {
+	const agent = useAgent({ initialSessionId });
 	const snap = useMemo(() => buildSnapshot(agent), [agent]);
 	const client = useMemo(() => buildGuestClient(agent), [agent]);
+
+	// Handle browser back/forward: if the URL returns to /, the server
+	// doesn't emit a reset frame — just go back to the picker.
+	useEffect(() => {
+		const onPop = () => {
+			const path = window.location.pathname;
+			if (path === "/" || path === "") {
+				agent.reconnect();
+			} else if (path.startsWith("/session/")) {
+				// Back to a session URL - find it in the list and select
+				const id = path.replace("/session/", "");
+				const s = agent.sessionList?.local.find(s => s.id.startsWith(id))
+					?? agent.sessionList?.all.find(s => s.id.startsWith(id));
+				if (s) agent.selectSession(s.path);
+			}
+		};
+		window.addEventListener("popstate", onPop);
+		return () => window.removeEventListener("popstate", onPop);
+	}, [agent.reconnect, agent.selectSession, agent.sessionList]);
 
 	if (agent.phase === "connecting" || agent.phase === "ended") {
 		return (
@@ -46,7 +64,17 @@ export function App(): ReactNode {
 				loading={agent.sessionList === null && agent.sessionListError === null}
 				switching={agent.switching}
 				cwd={agent.sessionList?.cwd ?? agent.state?.cwd ?? ""}
-				onSelect={agent.selectSession}
+				onSelect={(path) => {
+					agent.selectSession(path);
+					// Update the URL so the session is bookmarked and shareable.
+					// The session ID comes from the list we just fetched.
+					const session = agent.sessionList?.local.find(s => s.path === path)
+						?? agent.sessionList?.all.find(s => s.path === path);
+					const id = session?.id;
+					if (id) {
+						history.pushState({ sessionId: id }, "", `/session/${id}`);
+					}
+				}}
 				onNew={agent.newSession}
 				onRefresh={agent.refreshSessionList}
 				onDelete={agent.deleteSession}
@@ -56,7 +84,7 @@ export function App(): ReactNode {
 
 	return (
 		<div className="sh-app">
-			<HeaderBar snapshot={snap} subCount={0} railOpen={false} onToggleRail={() => {}} onLeave={() => agent.reconnect()} />
+			<HeaderBar snapshot={snap} subCount={0} railOpen={false} onToggleRail={() => {}} onLeave={() => { agent.reconnect(); history.pushState(null, "", "/"); }} />
 			<main className="sh-main">
 				<section className="sh-content">
 					<div className="sh-transcript">

@@ -97,19 +97,45 @@
 }
 
 .sh-lockup-mark {
-	font-size: 40px;
+	font-size: 28px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 48px;
+	height: 48px;
+	border-radius: 12px;
+	background: var(--bg-overlay);
+	border: 1px solid var(--border);
 }
 
 /* ---- Session picker ---- */
 
 .sh-picker-card {
-	max-width: 680px;
+	max-width: 640px;
 	width: 100%;
+	/* Critical: as a grid item in .sh-connect, the default min-width: auto
+	 * resolves to the min-content width — which is driven by the longest
+	 * session title (can be thousands of chars). min-width: 0 lets the card
+	 * shrink to its width: 100% (viewport width) instead of overflowing. */
+	min-width: 0;
 	padding: 24px 24px 20px;
 	background: var(--bg-raised);
 	border: 1px solid var(--border);
 	border-radius: var(--radius-lg);
 	box-shadow: 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+/* Override collab-web's .sh-connect-head (display: flex; flex-direction: row;
+ * justify-content: space-between) which is designed for the connect screen's
+ * lockup + theme-toggle layout. The picker needs a vertical stack: mark, title,
+ * subtitle. The descendant selector gives us higher specificity than collab-web's
+ * bare class. */
+.sh-picker-card .sh-connect-head {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	justify-content: flex-start;
+	gap: 2px;
 }
 
 .sh-picker-card .sh-connect-head h2 {
@@ -119,13 +145,36 @@
 	letter-spacing: -0.01em;
 }
 
+.sh-picker-cwd-label {
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: var(--fg-faint);
+	margin-right: 5px;
+}
+
+.sh-picker-cwd {
+	font-family: var(--font-mono);
+	font-size: 11px;
+	color: var(--fg-muted);
+}
+
 .sh-picker-actions {
 	display: flex;
 	gap: 8px;
 	margin: 16px 0;
 }
 
-/* Ghost button — reuses the sh-btn primitive from collab-web but stays muted so
+.sh-picker-btn-new {
+	flex: 1 1 auto;
+	justify-content: center;
+}
+
+.sh-picker-btn-refresh {
+	flex: 0 0 auto;
+}
+
+/* Ghost button - reuses the sh-btn primitive from collab-web but stays muted so
  * "refresh" doesn't compete visually with the primary "new session" CTA. */
 .sh-btn-ghost {
 	background: transparent;
@@ -161,11 +210,20 @@
 }
 
 .sh-picker-empty {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
 	text-align: center;
 	color: var(--fg-muted);
-	padding: 24px 0;
+	padding: 32px 0;
 	border: 1px dashed var(--border);
 	border-radius: var(--radius);
+	margin-bottom: 4px;
+}
+
+.sh-picker-empty-icon {
+	color: var(--fg-faint);
 	margin-bottom: 4px;
 }
 
@@ -176,22 +234,84 @@
 
 .sh-picker-empty-sub {
 	font-size: 11px;
-	margin-top: 4px;
 	color: var(--fg-faint);
 }
+
+/* ---- Skeleton loading ---- */
+
+.sh-picker-skeleton {
+	pointer-events: none;
+}
+
+.sh-picker-skeleton-row {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 12px 14px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--bg-raised);
+}
+
+.sh-picker-skeleton-line {
+	height: 12px;
+	border-radius: var(--radius-sm);
+	background: linear-gradient(
+		90deg,
+		var(--bg-overlay) 0%,
+		color-mix(in srgb, var(--fg) 8%, var(--bg-overlay)) 50%,
+		var(--bg-overlay) 100%
+	);
+	background-size: 200% 100%;
+	animation: sh-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.sh-picker-skeleton-meta {
+	height: 10px;
+}
+
+@keyframes sh-skeleton-shimmer {
+	0% { background-position: 200% 0; }
+	100% { background-position: -200% 0; }
+}
+
+/* ---- Session list ---- */
 
 .sh-picker-list {
 	list-style: none;
 	margin: 0;
-	padding: 0;
+	padding: 0 4px;
 	display: flex;
 	flex-direction: column;
 	gap: 4px;
 	max-height: 60vh;
 	overflow-y: auto;
-	/* Pull the list out of the card padding so rows can be full-width. */
-	margin: 0 -4px;
-	padding: 0 4px;
+	overflow-x: hidden;
+	/* min-width: 0 lets the list shrink within the card's flex column;
+	 * without it, long session titles expand the list (and thus the card)
+	 * past the viewport. */
+	min-width: 0;
+	overscroll-behavior: contain;
+	scrollbar-width: thin;
+	scrollbar-color: var(--border-strong) transparent;
+}
+
+/* Webkit scrollbar - thin, themed, doesn't steal space from content. */
+.sh-picker-list::-webkit-scrollbar {
+	width: 6px;
+}
+
+.sh-picker-list::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.sh-picker-list::-webkit-scrollbar-thumb {
+	background: var(--border-strong);
+	border-radius: 3px;
+}
+
+.sh-picker-list::-webkit-scrollbar-thumb:hover {
+	background: var(--fg-faint);
 }
 
 .sh-picker-group {
@@ -201,7 +321,28 @@
 	color: var(--fg-faint);
 	padding: 14px 6px 6px;
 	font-weight: 600;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
 }
+
+.sh-picker-group-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	min-width: 0;
+	flex: 0 1 auto;
+}
+
+.sh-picker-group::after {
+	content: "";
+	flex: 1 1 auto;
+	height: 1px;
+	background: var(--border);
+}
+
+/* ---- Session row ---- */
 
 .sh-picker-row {
 	display: flex;
@@ -231,6 +372,8 @@
 	text-align: left;
 	cursor: pointer;
 	font: inherit;
+	min-height: 44px;
+	justify-content: center;
 }
 
 .sh-picker-row-main:disabled {
@@ -262,15 +405,36 @@
 }
 
 .sh-picker-meta {
+	display: flex;
+	align-items: center;
+	gap: 5px;
 	font-size: 11px;
 	color: var(--fg-muted);
 	font-variant-numeric: tabular-nums;
+	flex-wrap: wrap;
 }
 
-/* Status pill — same labels TUI uses, with a tone for quick scanning. */
+.sh-picker-meta-sep {
+	color: var(--fg-faint);
+	user-select: none;
+}
+
+.sh-picker-local-tag {
+	font-size: 10px;
+	font-weight: 500;
+	color: var(--accent);
+	background: var(--accent-muted);
+	padding: 0 5px;
+	border-radius: 3px;
+	letter-spacing: 0.02em;
+	white-space: nowrap;
+}
+
+/* Status pill - same labels TUI uses, with a tone for quick scanning. */
 .sh-pill {
 	display: inline-flex;
 	align-items: center;
+	gap: 4px;
 	font-size: 10px;
 	font-weight: 500;
 	letter-spacing: 0.04em;
@@ -281,6 +445,15 @@
 	background: var(--bg-overlay);
 	text-transform: lowercase;
 	white-space: nowrap;
+	flex: 0 0 auto;
+}
+
+.sh-pill-dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: currentColor;
+	flex: 0 0 auto;
 }
 
 .sh-pill-ok {
@@ -305,20 +478,22 @@
 	color: var(--fg-faint);
 }
 
-/* Delete affordance — sits in a gutter on the right of the row; reveals on
- * hover for desktop, always visible on touch devices. */
+/* Delete affordance - sits in a gutter on the right of the row; reveals on
+ * hover for desktop, always visible on touch devices. Touch targets meet
+ * the 44px minimum recommended by Apple/WCAG for interactive elements. */
 .sh-picker-row-delete {
 	flex: 0 0 auto;
-	width: 32px;
+	width: 44px;
 	background: transparent;
 	border: none;
 	border-left: 1px solid var(--border);
 	color: var(--fg-faint);
-	font-size: 18px;
-	line-height: 1;
 	cursor: pointer;
 	transition: color 80ms ease, background 80ms ease;
-	opacity: 0.5;
+	opacity: 0.4;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 }
 
 .sh-picker-row:hover .sh-picker-row-delete,
@@ -336,7 +511,7 @@
 	opacity: 0.2;
 }
 
-/* Inline confirm — replaces the row content with a Yes/No prompt. Matches the
+/* Inline confirm - replaces the row content with a Yes/No prompt. Matches the
  * TUI's "Delete session? Yes/No" pattern but stays in the row slot so the user
  * keeps their scroll position and the surrounding context. */
 .sh-picker-confirm {
@@ -366,4 +541,119 @@
 	flex: 0 0 auto;
 	display: flex;
 	gap: 6px;
+}
+
+/* ---- Icon helpers ---- */
+
+.sh-icon-spin {
+	animation: sh-icon-spin 0.8s linear infinite;
+}
+
+@keyframes sh-icon-spin {
+	to { transform: rotate(360deg); }
+}
+
+/* ---- Responsive ---- */
+
+/* Tablet and below: reduce card padding, let the list breathe. */
+@media (max-width: 640px) {
+	.sh-connect {
+		padding: 16px;
+	}
+
+	.sh-picker-card {
+		max-width: 100%;
+		padding: 18px 16px 14px;
+		border-radius: var(--radius);
+	}
+
+	.sh-picker-list {
+		max-height: none;
+	}
+}
+
+/* Phone: full-bleed card, touch-first sizing, stacked confirm. */
+@media (max-width: 480px) {
+	.sh-connect {
+		padding: 0;
+		/* Override place-items: center -> justify-items: stretch so the card
+		 * fills the full viewport width instead of being centered (and thus
+		 * sized to its content). align-items: stretch handles the vertical axis. */
+		align-items: stretch;
+		justify-items: stretch;
+	}
+
+	.sh-picker-card {
+		border-radius: 0;
+		border-left: none;
+		border-right: none;
+		min-height: 100%;
+		padding: 16px 14px 14px;
+		/* Leave room for iOS safe areas when in landscape or PWA mode. */
+		padding-bottom: max(14px, env(safe-area-inset-bottom));
+		padding-top: max(16px, env(safe-area-inset-top));
+	}
+
+	.sh-lockup-mark {
+		width: 42px;
+		height: 42px;
+		font-size: 24px;
+		border-radius: 10px;
+	}
+
+	.sh-picker-card .sh-connect-head h2 {
+		font-size: 17px;
+	}
+
+	/* Buttons stretch full-width; refresh is compact. */
+	.sh-picker-actions {
+		gap: 6px;
+	}
+
+	/* Rows get extra vertical padding for touch. */
+	.sh-picker-row-main {
+		padding: 12px 12px;
+		min-height: 48px;
+	}
+
+	.sh-picker-row-delete {
+		width: 48px;
+	}
+
+	/* Delete is always visible on touch - no hover state to rely on. */
+	.sh-picker-row-delete {
+		opacity: 0.6;
+	}
+
+	/* Confirm dialog stacks vertically: question on top, buttons below. */
+	.sh-picker-confirm {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 8px;
+		padding: 12px;
+	}
+
+	.sh-picker-confirm-text {
+		white-space: normal;
+	}
+
+	.sh-picker-confirm-actions {
+		justify-content: flex-end;
+	}
+
+	/* Group headers: tighter on small screens. */
+	.sh-picker-group {
+		padding: 10px 4px 4px;
+	}
+}
+
+/* Very small phones: tighten further, hide refresh label. */
+@media (max-width: 360px) {
+	.sh-picker-btn-refresh span {
+		display: none;
+	}
+
+	.sh-picker-btn-refresh {
+		padding: 4px 8px;
+	}
 }

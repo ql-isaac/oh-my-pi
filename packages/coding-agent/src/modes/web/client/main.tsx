@@ -12,6 +12,17 @@ import "./styles.css";
 
 import { App } from "./App";
 
+/**
+ * Extract a session ID from the URL pathname.
+ * Pattern: /session/<id>  →  returns the ID.
+ * Anything else (including /) returns undefined.
+ */
+function parseInitialSessionId(): string | undefined {
+	const m = window.location.pathname.match(/^\/session\/([^/]+)$/);
+	return m ? m[1] : undefined;
+}
+
+const initialSessionId = parseInitialSessionId();
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
-createRoot(root).render(<App />);
+createRoot(root).render(<App initialSessionId={initialSessionId} />);
