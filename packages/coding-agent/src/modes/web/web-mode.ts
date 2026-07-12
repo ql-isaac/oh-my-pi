@@ -27,6 +27,8 @@ export interface WebModeOptions {
 	port?: number;
 	host?: string;
 	open?: boolean;
+	/** Factory: creates a fresh AgentSession for a session file path. */
+	forkSession?: (path: string) => Promise<import("../../session/agent-session").AgentSession>;
 }
 
 // ---------------------------------------------------------------------------
@@ -34,20 +36,17 @@ export interface WebModeOptions {
 // ---------------------------------------------------------------------------
 
 export async function runWebMode(
-	session: import("../../session/agent-session").AgentSession,
 	options: WebModeOptions = {},
 ): Promise<never> {
 	const port = options.port ?? 3000;
 	const host = options.host ?? "127.0.0.1";
 	const cwd = process.cwd();
 
-	// No pre-collected entries: the welcome frame is rebuilt on every connect and
-	// after each session switch, so the snapshot always reflects session.messages
-	// at the moment it's sent.
-
-	// Collab host — subscribes to session events
-	const collabHost = new CollabHost(session, { cwd });
-	collabHost.start();
+	// Collab host — each session path gets its own AgentSession on demand.
+	const collabHost = new CollabHost({
+		cwd,
+		forkSession: options.forkSession ?? (async () => { throw new Error("forkSession not provided"); }),
+	});
 
 	// Resolve client directories
 	const clientDir = path.resolve(import.meta.dir, "client");
@@ -181,14 +180,22 @@ export async function runWebMode(
 					const frame = JSON.parse(text) as Record<string, unknown>;
 					const t = frame.t as string;
 					if (t === "prompt") {
-						collabHost.handlePrompt(frame.text as string ?? "");
+						const client = clientsByWs.get(ws);
+						if (client) {
+							collabHost.handlePrompt(client, frame.text as string ?? "").catch((err: unknown) => {
+								const msg = err instanceof Error ? err.message : String(err);
+								logger.warn("web-mode: handlePrompt rejected", { error: msg });
+								client.send(JSON.stringify({ t: "error", message: msg }));
+							});
+						}
 					} else if (t === "abort") {
-						collabHost.handleAbort();
+						const client = clientsByWs.get(ws);
+						if (client) collabHost.handleAbort(client);
 					} else if (t === "resume") {
 						const target = frame.path as string | undefined;
 						const client = clientsByWs.get(ws);
 						if (target && client) {
-							collabHost.switchSession(target).then(ok => {
+							collabHost.switchSessionForClient(client, target).then(ok => {
 								if (!ok && client) {
 									client.send(JSON.stringify({ t: "error", message: "failed to switch session" }));
 								}
@@ -201,7 +208,7 @@ export async function runWebMode(
 					} else if (t === "new") {
 						const client = clientsByWs.get(ws);
 						if (client) {
-							collabHost.newSession().then(ok => {
+							collabHost.newSessionForClient(client).then(ok => {
 								if (!ok && client) {
 									client.send(JSON.stringify({ t: "error", message: "failed to create new session" }));
 								}
@@ -235,13 +242,11 @@ export async function runWebMode(
 
 	process.on("SIGINT", async () => {
 		console.error("\n[web] shutting down...");
-		collabHost.stop();
 		server.stop();
 		process.exit(0);
 	});
 	process.on("SIGTERM", async () => {
 		console.error("[web] shutting down...");
-		collabHost.stop();
 		server.stop();
 		process.exit(0);
 	});
