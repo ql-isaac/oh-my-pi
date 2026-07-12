@@ -1,298 +1,167 @@
 /**
  * Collab host protocol - emits HostFrame messages directly from the agent
- * session over WebSocket. Replaces the RPC subprocess bridge.
+ * session over WebSocket. Each distinct session path gets its own
+ * AgentSession instance, so multiple browser tabs on different sessions
+ * can stream responses concurrently without blocking.
  */
 
 import type { WireMessage } from "@oh-my-pi/pi-wire";
 import type { AgentSession } from "../../session/agent-session";
-// The collab HostFrame type re-exports AgentEvent so we don't import it separately.
 import type { SessionEntry, SessionHeader, SessionState, HostFrame } from "@oh-my-pi/pi-wire";
 import { $env, logger } from "@oh-my-pi/pi-utils";
 import { generateSessionTitle } from "../../utils/title-generator";
 
-// ---------------------------------------------------------------------------
-// Outbound helpers
-// ---------------------------------------------------------------------------
-
 function sendFrame(ws: { send(obj: unknown): void }, frame: HostFrame): void {
-	try {
-		ws.send(frame);
-	} catch {
-		// client disconnected
-	}
+	try { ws.send(frame); } catch {}
 }
 
-function toTimestamp(ts?: number): string {
-	return new Date(ts ?? Date.now()).toISOString();
-}
+function toTimestamp(ts?: number): string { return new Date(ts ?? Date.now()).toISOString(); }
 
-// ---------------------------------------------------------------------------
-// Collab Host
-// ---------------------------------------------------------------------------
-
-export interface CollabOpts {
-	/** Current working directory. */
-	cwd: string;
-}
+export interface CollabOpts { cwd: string; forkSession: (path: string) => Promise<AgentSession>; }
 
 export class CollabHost {
-	#session: AgentSession;
 	#opts: CollabOpts;
 	#clients = new Set<{ send(obj: unknown): void }>();
-	#unsubSession?: () => void;
-	#unsubTitle?: () => void;
-	/**
-	 * Drops session events to clients while a session switch is in flight, so the
-	 * teardown/abort/replay noise from `switchSession` never reaches them. The
-	 * switch path then explicitly sends a fresh snapshot, which is the only
-	 * truth worth shipping for the new session.
-	 */
-	#paused = false;
+	#clientSessions = new Map<{ send(obj: unknown): void }, string>();
+	#slots = new Map<string, { session: AgentSession; unsubEvents: () => void; unsubTitle: () => void }>();
 
-	constructor(session: AgentSession, opts: CollabOpts) {
-		this.#session = session;
-		this.#opts = opts;
-	}
+	constructor(opts: CollabOpts) { this.#opts = opts; }
 
-	start(): void {
-		// Subscribe to session events and forward as collab `event` frames.
-		// The session emits AgentSessionEvent (extends AgentEvent) - we feed
-		// everything through to the WebSocket; the collab protocol tolerates
-		// unknown event types via a default: in applyEvent.
-		this.#unsubSession = this.#session.subscribe((_event: object) => {
-			// Drop the teardown/abort/replay noise from an in-flight
-			// switchSession; the new welcome frame is the only state worth
-			// shipping for the new session.
-			if (this.#paused) return;
-			const event = _event as Record<string, unknown>;
-			for (const client of this.#clients) {
-				sendFrame(client, { t: "event", event } as unknown as HostFrame);
-			}
-
-			// Also emit `entry` frames for finalized messages
-			if (event.type === "message_end") {
-				const msg = event.message as Record<string, unknown> | undefined;
-				const role = msg?.role as string | undefined;
-				if (role === "user" || role === "assistant" || role === "toolResult") {
-					const entry = buildEntry(msg ?? {});
-					if (entry) {
-						for (const client of this.#clients) {
-							sendFrame(client, { t: "entry", entry } as HostFrame);
-						}
-					}
-				}
-			}
-		});
-
-		// Broadcast a fresh `state` frame whenever the session name changes so
-		// the header title updates live. Without this the auto-generated title
-		// (or a /rename) never reaches already-connected clients.
-		this.#unsubTitle = this.#session.sessionManager.onSessionNameChanged(() => {
-			this.#broadcastState();
-		});
-	}
-
-	stop(): void {
-		this.#unsubSession?.();
-		this.#unsubSession = undefined;
-		this.#unsubTitle?.();
-		this.#unsubTitle = undefined;
-	}
-
-	/** Register a freshly-connected client. Welcome is deferred until the user
-	 *  picks a session via `resume`/`new` - sending it eagerly here would race
-	 *  the picker UI and auto-flip the client into the transcript view. */
-	addClient(client: { send(obj: unknown): void }): void {
-		this.#clients.add(client);
-	}
-
-	/** Send snapshot + welcome to a single (already-registered) client. Reads
-	 *  the current session's messages, so a fresh `switchSession` followed by
-	 *  `sendWelcomeTo` always reflects the new session. */
-	sendWelcomeTo(client: { send(obj: unknown): void }): void {
-		const entries = this.#buildEntries();
-
-		// Send snapshot chunks
-		const CHUNK_SIZE = 50;
-		for (let i = 0; i < entries.length; i += CHUNK_SIZE) {
-			const chunk = entries.slice(i, i + CHUNK_SIZE);
-			const final = i + CHUNK_SIZE >= entries.length;
-			sendFrame(client, { t: "snapshot-chunk", entries: chunk, final });
-		}
-
-		// If no existing entries, just send empty welcome
-		if (entries.length === 0) {
-			sendFrame(client, { t: "snapshot-chunk", entries: [], final: true });
-		}
-
-		// Send welcome after chunks
-		sendFrame(client, {
-			t: "welcome",
-			proto: 3,
-			header: this.#buildHeader(),
-			state: this.#buildState(),
-			agents: [],
-			entryCount: entries.length,
-		});
-	}
-
+	addClient(client: { send(obj: unknown): void }): void { this.#clients.add(client); }
 	removeClient(client: { send(obj: unknown): void }): void {
 		this.#clients.delete(client);
+		const path = this.#clientSessions.get(client);
+		this.#clientSessions.delete(client);
+		// P0 fix: clean up slot when no clients remain on this session path.
+		if (path) this.#maybeCleanupSlot(path);
 	}
-	async switchSession(sessionPath: string): Promise<boolean> {
-		if (this.#paused) return false;
-		this.#paused = true;
+
+	async switchSessionForClient(client: { send(obj: unknown): void }, sessionPath: string): Promise<boolean> {
 		try {
-			const ok = await this.#session.switchSession(sessionPath);
-			if (!ok) return false;
-			for (const client of this.#clients) this.#sendResetAndWelcome(client);
+			const slot = await this.#getOrCreateSlot(sessionPath);
+			if (!slot) return false;
+			this.#clientSessions.set(client, sessionPath);
+			this.#sendResetAndWelcome(client, slot.session);
 			return true;
-		} finally {
-			this.#paused = false;
-		}
+		} catch { return false; }
 	}
 
-	/** Start a fresh in-memory session. Same broadcast contract as switchSession. */
-	async newSession(): Promise<boolean> {
-		if (this.#paused) return false;
-		this.#paused = true;
+	async newSessionForClient(client: { send(obj: unknown): void }): Promise<boolean> {
 		try {
-			const ok = await this.#session.newSession();
-			if (!ok) return false;
-			for (const client of this.#clients) this.#sendResetAndWelcome(client);
+			const session = await this.#opts.forkSession("__empty");
+			await session.newSession();
+			const filePath = session.sessionManager.getSessionFile();
+			if (!filePath) return false;
+			this.#installSlot(filePath, session);
+			this.#clientSessions.set(client, filePath);
+			this.#sendResetAndWelcome(client, session);
 			return true;
-		} finally {
-			this.#paused = false;
-		}
+		} catch { return false; }
 	}
 
-	#sendResetAndWelcome(client: { send(obj: unknown): void }): void {
-		// Custom frame — see useAgent.ts. Tells the client to drop any in-flight
-		// stream ghost, active tools, and pending entries; the subsequent welcome
-		// then seeds the new transcript fresh. Not part of the shared wire protocol.
-		sendFrame(client, { t: "reset" } as unknown as HostFrame);
-		this.sendWelcomeTo(client);
+	async handlePrompt(client: { send(obj: unknown): void }, text: string): Promise<void> {
+		const clientPath = this.#clientSessions.get(client);
+		if (!clientPath) { logger.info("collab-host handlePrompt: no session for client"); return; }
+		const slot = this.#slots.get(clientPath);
+		if (!slot) { logger.info("collab-host handlePrompt: no slot", { path: clientPath.slice(-40) }); return; }
+		generateTitle(slot.session, text);
+		slot.session.prompt(text).catch(() => {});
 	}
 
-	handlePrompt(text: string): void {
-		// Auto-generate a session title from the first user message, mirroring
-		// input-controller's path. Web mode bypasses input-controller entirely,
-		// so without this the header title stays empty until a /rename. Only
-		// fires when no name is set yet and titling isn't disabled (--no-title).
-		this.#maybeGenerateTitle(text);
-		this.#session.prompt(text).catch(() => {});
+	handleAbort(client: { send(obj: unknown): void }): void {
+		const clientPath = this.#clientSessions.get(client);
+		if (!clientPath) return;
+		const slot = this.#slots.get(clientPath);
+		if (slot) slot.session.abort().catch(() => {});
 	}
 
-	handleAbort(): void {
-		this.#session.abort().catch(() => {});
+	/** Deduplicates concurrent slot creation for the same path (TOCTOU fix). */
+	#pendingSlots = new Map<string, Promise<{ session: AgentSession; unsubEvents: () => void; unsubTitle: () => void } | null>>();
+
+	async #getOrCreateSlot(sessionPath: string) {
+		const existing = this.#slots.get(sessionPath);
+		if (existing) return existing;
+		const pending = this.#pendingSlots.get(sessionPath);
+		if (pending) return pending;
+		const p = (async () => {
+			logger.info("collab-host creating slot", { path: sessionPath.slice(-50) });
+			const session = await this.#opts.forkSession(sessionPath);
+			if (!session) return null;
+			this.#installSlot(sessionPath, session);
+			return this.#slots.get(sessionPath) ?? null;
+		})();
+		this.#pendingSlots.set(sessionPath, p);
+		try { return await p; } finally { this.#pendingSlots.delete(sessionPath); }
 	}
 
-	#buildState(): SessionState {
-		return {
-			isStreaming: this.#session.isStreaming,
-			queuedMessageCount: this.#session.queuedMessageCount,
-			sessionName: this.#session.sessionName ?? undefined,
-			cwd: this.#opts.cwd,
-			model: this.#session.model
-				? {
-						id: this.#session.model.id,
-						name: this.#session.model.id,
-						provider: this.#session.model.provider,
-						contextWindow: this.#session.model.contextWindow ?? 0,
-					}
-				: undefined,
-			contextUsage: this.#session.getContextUsage() ?? undefined,
-			participants: [],
-		};
+	/** Remove a slot if no clients remain on its session path (P0 leak fix). */
+	#maybeCleanupSlot(sessionPath: string): void {
+		const inUse = [...this.#clientSessions.values()].some(p => p === sessionPath);
+		if (inUse) return;
+		const slot = this.#slots.get(sessionPath);
+		if (!slot) return;
+		slot.unsubEvents(); slot.unsubTitle();
+		this.#slots.delete(sessionPath);
+		logger.info("collab-host slot cleaned up", { path: sessionPath.slice(-50) });
 	}
 
-	#buildHeader(): SessionHeader {
-		return {
-			type: "session",
-			id: this.#session.sessionId,
-			title: this.#session.sessionName ?? undefined,
-			timestamp: toTimestamp(),
-			cwd: this.#opts.cwd,
-		};
-	}
-
-	/** Push the current state to every connected client. */
-	#broadcastState(): void {
-		const state = this.#buildState();
-		for (const client of this.#clients) {
-			sendFrame(client, { t: "state", state } as HostFrame);
-		}
-	}
-
-	/** Convert session.messages (AgentMessage[]) into the SessionEntry[] that
-	 *  ships in the welcome snapshot. Lives next to the existing buildEntry()
-	 *  helper for the live event path so the two stay in sync. */
-	#buildEntries(): SessionEntry[] {
-		const out: SessionEntry[] = [];
-		for (const raw of this.#session.messages) {
-			const entry = buildEntry(raw);
-			if (entry) out.push(entry);
-		}
-		return out;
-	}
-
-	#maybeGenerateTitle(text: string): void {
-		const mgr = this.#session.sessionManager;
-		if (mgr.getSessionName()) return;
-		if ($env.PI_NO_TITLE) return;
-		// Capture the session identity at call time. If a switchSession occurs
-		// while the title generation is in flight, the `then` block detects the
-		// mismatch and drops the stale result instead of writing session-A's
-		// first message into session-B's name.
-		const sessionId = this.#session.sessionId;
-		generateSessionTitle(
-			text,
-			this.#session.modelRegistry,
-			this.#session.settings,
-			sessionId,
-			this.#session.model ?? undefined,
-			(provider: string) => this.#session.agent.metadataForProvider(provider),
-			this.#session.titleSystemPrompt,
-		)
-			.then(async title => {
-				// Re-check after the async gap: session may have been switched.
-				if (this.#session.sessionId !== sessionId) return;
-				if (title && !mgr.getSessionName()) {
-					await mgr.setSessionName(title, "auto");
+	#installSlot(sessionPath: string, session: AgentSession): void {
+		const unsubEvents = session.subscribe((_event: object) => {
+			const event = _event as Record<string, unknown>;
+			let matchCount = 0;
+			for (const c of this.#clients) { if (this.#clientSessions.get(c) !== sessionPath) continue; matchCount++; sendFrame(c, { t: "event", event } as unknown as HostFrame); }
+			if (event.type === "message_end") {
+				const msg = event.message as Record<string, unknown> | undefined;
+				if (msg && (msg.role === "user" || msg.role === "assistant" || msg.role === "toolResult")) {
+					const entry = buildEntry(msg);
+					if (entry) for (const c of this.#clients) { if (this.#clientSessions.get(c) !== sessionPath) continue; sendFrame(c, { t: "entry", entry } as HostFrame); }
 				}
-			})
-			.catch(err => {
-				logger.warn("web-mode: auto-title error", {
-					sessionId,
-					reason: "auto-title-error",
-					error: err instanceof Error ? err.message : String(err),
-				});
-			});
+			}
+		});
+		const unsubTitle = session.sessionManager.onSessionNameChanged(() => {
+			const state = buildState(session, this.#opts.cwd);
+			for (const c of this.#clients) { if (this.#clientSessions.get(c) !== sessionPath) continue; sendFrame(c, { t: "state", state } as HostFrame); }
+		});
+		this.#slots.set(sessionPath, { session, unsubEvents, unsubTitle });
+	}
+
+	#sendResetAndWelcome(client: { send(obj: unknown): void }, session: AgentSession): void {
+		sendFrame(client, { t: "reset" });
+		const entries = buildEntries(session);
+		if (entries.length === 0) { sendFrame(client, { t: "snapshot-chunk", entries: [], final: true }); }
+		else { let o = 0; while (o < entries.length) { const c = entries.slice(o, o + 50); o += 50; sendFrame(client, { t: "snapshot-chunk", entries: c, final: o >= entries.length }); } }
+		sendFrame(client, { t: "welcome", proto: 3, header: buildHeader(session), state: buildState(session, this.#opts.cwd), agents: [], entryCount: entries.length });
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Build SessionEntry from a message_end event
-// ---------------------------------------------------------------------------
-
-function buildEntry(message: unknown): SessionEntry | null {
-	if (!message || typeof message !== "object") return null;
-	if (!("role" in message)) return null;
+function buildEntry(message: Record<string, unknown>): SessionEntry | null {
+	if (typeof message?.role !== "string") return null;
 	const role = message.role;
-	// Only user/assistant/toolResult become visible entries; the other roles
-	// (developer/custom) are skipped on purpose — collab-web doesn't render them.
 	if (role !== "user" && role !== "assistant" && role !== "toolResult") return null;
-	const ts = "timestamp" in message && typeof message.timestamp === "number" ? message.timestamp : undefined;
-	// Messages have no stable id of their own; synthesize a unique one per emission.
-	const id = `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-	// role-narrowed to {user, assistant, toolResult} — a strict subset of WireMessage.
-	// Compiler can't prove the narrowing from `unknown`, but the `role` check above
-	// guarantees we never feed a developer/custom message into a message entry.
-	return {
-		type: "message",
-		id,
-		parentId: null,
-		timestamp: toTimestamp(ts),
-		message: message as unknown as WireMessage,
-	};
+	const ts = typeof message.timestamp === "number" ? message.timestamp : undefined;
+	return { type: "message", id: `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`, parentId: null, timestamp: toTimestamp(ts), message: message as unknown as WireMessage };
+}
+
+function buildState(session: AgentSession, cwd: string): SessionState {
+	return { isStreaming: session.isStreaming, queuedMessageCount: session.queuedMessageCount, sessionName: session.sessionName ?? undefined, cwd, model: session.model ? { id: session.model.id, name: session.model.id, provider: session.model.provider, contextWindow: session.model.contextWindow ?? 0 } : undefined, contextUsage: session.getContextUsage() ?? undefined, participants: [] };
+}
+
+function buildHeader(session: AgentSession): SessionHeader {
+	return { type: "session", id: session.sessionId, title: session.sessionName ?? undefined, timestamp: toTimestamp(), cwd: session.sessionManager.getCwd() };
+}
+
+function buildEntries(session: AgentSession): SessionEntry[] {
+	const out: SessionEntry[] = [];
+	for (const raw of session.messages) { const entry = buildEntry(raw as unknown as Record<string, unknown>); if (entry) out.push(entry); }
+	return out;
+}
+
+function generateTitle(session: AgentSession, text: string): void {
+	const mgr = session.sessionManager;
+	if (mgr.getSessionName()) return;
+	if ($env.PI_NO_TITLE) return;
+	const sessionId = session.sessionId;
+	generateSessionTitle(text, session.modelRegistry, session.settings, sessionId, session.model ?? undefined, (p: string) => session.agent.metadataForProvider(p), session.titleSystemPrompt)
+		.then(async title => { if (session.sessionId !== sessionId) return; if (title && !mgr.getSessionName()) await mgr.setSessionName(title, "auto"); })
+		.catch(err => logger.warn("web-mode: auto-title error", { sessionId, error: err instanceof Error ? err.message : String(err) }));
 }
