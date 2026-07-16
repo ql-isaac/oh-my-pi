@@ -3,7 +3,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentSnapshot, HostFrame, SessionEntry, SessionState, AgentEvent, AssistantMessage, ActiveTool, SubagentProgressPayload, SubagentLifecyclePayload } from "@oh-my-pi/pi-wire";
+import type { AgentSnapshot, HostFrame, SessionEntry, SessionHeader, SessionState, AgentEvent, AssistantMessage, ActiveTool, SubagentProgressPayload, SubagentLifecyclePayload } from "@oh-my-pi/pi-wire";
 import type { Notice, TranscriptResult } from "@oh-my-pi/collab-web/guest-client";
 
 export type ConnectionPhase = "connecting" | "selecting" | "live" | "reconnecting" | "ended";
@@ -35,6 +35,7 @@ export interface UseAgentReturn {
 	activeTools: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
 	state: SessionState | null;
+	header: SessionHeader | null;
 	agents: readonly AgentSnapshot[];
 	progress: ReadonlyMap<string, SubagentProgressPayload>;
 	lifecycle: ReadonlyMap<string, SubagentLifecyclePayload>;
@@ -82,8 +83,8 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 		setStreamDoneState(d);
 	}, []);
 	const [activeTools, setActiveTools] = useState<ReadonlyMap<string, ActiveTool>>(new Map());
-	const [working, setWorking] = useState(false);
 	const [state, setState] = useState<SessionState | null>(null);
+	const [header, setHeader] = useState<SessionHeader | null>(null);
 	const [agents, setAgents] = useState<readonly AgentSnapshot[]>([]);
 	const [progress, setProgress] = useState<ReadonlyMap<string, SubagentProgressPayload>>(new Map());
 	const [lifecycle, setLifecycle] = useState<ReadonlyMap<string, SubagentLifecyclePayload>>(new Map());
@@ -96,7 +97,6 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 	const initialId = opts?.initialSessionId;
 	// Reset the transcript back to a clean slate. Called on `reset` frames from
 	// the server (signals an imminent session switch) and never from anywhere
-	// else - the live event path is the only other writer to entries/stream.
 	const resetLocal = useCallback(() => {
 		setEntries([]);
 		setStream(null);
@@ -107,6 +107,7 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 		setAgents([]);
 		setProgress(new Map());
 		setLifecycle(new Map());
+		setHeader(null);
 		pendingChunks.current = [];
 		chunkFinalRef.current = false;
 	}, []);
@@ -168,6 +169,7 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 						setEntries(Object.freeze(queued));
 					}
 					setState(frame.state);
+					setHeader(frame.header);
 					setWorking(frame.state.isStreaming);
 					setAgents(frame.agents ?? []);
 					setProgress(new Map());
@@ -358,11 +360,12 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 	const reconnect = useCallback(() => {
 		wsRef.current?.close();
 		wsRef.current = null;
+		setHeader(null);
 		connect();
 	}, [connect]);
 
 	return {
-		phase, endedReason, entries, stream, streamDone, activeTools, working, state,
+	phase, endedReason, entries, stream, streamDone, activeTools, working, state, header,
 		agents, progress, lifecycle, notices,
 		sessionList, sessionListError, switching,
 		sendPrompt, abort, reconnect, selectSession, newSession, refreshSessionList: fetchSessionList,

@@ -17,9 +17,11 @@ export function buildGuestClient(agent: UseAgentReturn): GuestClient {
 }
 
 export function buildSnapshot(agent: UseAgentReturn): GuestSnapshot {
-	const header: SessionHeader = {
-		type: "session",
-		id: "web-mode",
+	// Use the real header from useAgent (set on welcome frame). Fall back to a
+	// placeholder so the Composer's optional header prop never sees null.
+	const header = agent.header ?? {
+		type: "session" as const,
+		id: "",
 		title: agent.state?.sessionName ?? undefined,
 		timestamp: new Date().toISOString(),
 		cwd: agent.state?.cwd ?? "",
