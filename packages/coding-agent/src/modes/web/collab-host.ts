@@ -209,7 +209,7 @@ export class CollabHost {
 			}
 		});
 		const unsubTitle = session.sessionManager.onSessionNameChanged(() => {
-			const state = buildState(session, this.#opts.cwd);
+		const state = buildState(session);
 			for (const c of this.#clients) { if (this.#clientSessions.get(c) !== sessionPath) continue; sendFrame(c, { t: "state", state } as unknown as HostFrame); }
 		});
 		// Subscribe to EventBus for subagent progress/lifecycle channels.
@@ -241,7 +241,7 @@ export class CollabHost {
 		const entries = buildEntries(slot.session);
 		if (entries.length === 0) { sendFrame(client, { t: "snapshot-chunk", entries: [], final: true }); }
 		else { let o = 0; while (o < entries.length) { const c = entries.slice(o, o + 50); o += 50; sendFrame(client, { t: "snapshot-chunk", entries: c, final: o >= entries.length }); } }
-		sendFrame(client, { t: "welcome", proto: 3, header: buildHeader(slot.session), state: buildState(slot.session, this.#opts.cwd), agents: this.#snapshotAgents(slot), entryCount: entries.length });
+		sendFrame(client, { t: "welcome", proto: 3, header: buildHeader(slot.session), state: buildState(slot.session), agents: this.#snapshotAgents(slot), entryCount: entries.length });
 	}
 
 	/** Build agent snapshot for a slot: main agent from session + subagents from registry. */
@@ -309,12 +309,21 @@ function buildEntry(message: Record<string, unknown>): SessionEntry | null {
 	return { type: "message", id: `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`, parentId: null, timestamp: toTimestamp(ts), message: message as unknown as WireMessage };
 }
 
-function buildState(session: AgentSession, cwd: string): SessionState {
-	return { isStreaming: session.isStreaming, queuedMessageCount: session.queuedMessageCount, sessionName: session.sessionName ?? undefined, cwd, model: session.model ? { id: session.model.id, name: session.model.id, provider: session.model.provider, contextWindow: session.model.contextWindow ?? 0 } : undefined, contextUsage: session.getContextUsage() ?? undefined, participants: [] };
+// Both the header and state must report the CWD recorded in the session
+// file. session.sessionManager.getCwd() returns the *resolved* cwd which
+// falls back to getProjectDir() (the web server's cwd) when the original
+// directory was deleted - displaying that as the session location is
+// misleading. getHeader()?.cwd is the raw value persisted on disk.
+function sessionCwd(session: AgentSession): string {
+	return session.sessionManager.getHeader()?.cwd ?? session.sessionManager.getCwd();
+}
+
+function buildState(session: AgentSession): SessionState {
+	return { isStreaming: session.isStreaming, queuedMessageCount: session.queuedMessageCount, sessionName: session.sessionName ?? undefined, cwd: sessionCwd(session), model: session.model ? { id: session.model.id, name: session.model.id, provider: session.model.provider, contextWindow: session.model.contextWindow ?? 0 } : undefined, contextUsage: session.getContextUsage() ?? undefined, participants: [] };
 }
 
 function buildHeader(session: AgentSession): SessionHeader {
-	return { type: "session", id: session.sessionId, title: session.sessionName ?? undefined, timestamp: toTimestamp(), cwd: session.sessionManager.getCwd() };
+	return { type: "session", id: session.sessionId, title: session.sessionName ?? undefined, timestamp: toTimestamp(), cwd: sessionCwd(session) };
 }
 
 function buildEntries(session: AgentSession): SessionEntry[] {
