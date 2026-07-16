@@ -15,7 +15,13 @@ import type { ToolRenderHost } from "@oh-my-pi/collab-web/tool-render";
 export function App({ initialSessionId }: { initialSessionId?: string }): ReactNode {
 	const agent = useAgent({ initialSessionId });
 	const snap = useMemo(() => buildSnapshot(agent), [agent]);
-	const client = useMemo(() => buildGuestClient(agent), [agent]);
+	// buildGuestClient wraps agent's useCallback-stable methods (sendPrompt,
+	// abort, sendAgentCmd, fetchTranscript) - so the wrapper itself is stable
+	// across renders even though `agent` is a fresh object each render. The
+	// empty-deps memo prevents AgentDrawer's polling useEffect from re-running
+	// on every render (it lists `client` in its deps); re-running it calls
+	// setEntries([]) which blanks the transcript and causes visible flicker.
+	const client = useMemo(() => buildGuestClient(agent), []);
 	const [railOpen, setRailOpen] = useState(false);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const autoOpenedRef = useRef(false);
