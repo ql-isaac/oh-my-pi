@@ -1670,17 +1670,20 @@ export async function runRootCommand(
 			const { runWebMode, parseWebModeArgs } = await import("./modes/web/web-mode");
 			const webOpts = parseWebModeArgs(rawArgs);
 			// Factory: creates independent AgentSession instances per session path.
-			// Each call opens the session file and creates a fresh AgentSession that
-			// can process prompts concurrently with other sessions.
-			webOpts.forkSession = async (sessionPath: string) => {
-				const mgr = await SessionManager.open(sessionPath, parsedArgs.sessionDir);
+			// With a path: opens the existing session file. Without: creates a
+			// fresh empty session via SessionManager.create (no "__empty" hack).
+			webOpts.forkSession = async (sessionPath?: string) => {
+				const mgr = sessionPath
+					? await SessionManager.open(sessionPath, parsedArgs.sessionDir)
+					: SessionManager.create(cwd, parsedArgs.sessionDir);
+				const eventBus = new EventBus();
 				const { session: s } = await createSession({
 					...sessionOptions,
 					sessionManager: mgr,
-					eventBus: new EventBus(),
+					eventBus,
 					preloadedExtensions: extensionsResult,
 				});
-				return s;
+				return { session: s, eventBus };
 			};
 			await runWebMode(webOpts);
 		} else if (isInteractive) {
