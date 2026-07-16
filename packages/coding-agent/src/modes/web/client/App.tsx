@@ -57,7 +57,19 @@ export function App({ initialSessionId }: { initialSessionId?: string }): ReactN
 	useEffect(() => {
 		const target = headerId ? `/session/${headerId}` : "/";
 		if (window.location.pathname !== target) history.pushState(null, "", target);
-	}, [headerId]);
+}, [headerId]);
+
+// Auto-open the rail the first time a subagent appears. Must be declared
+// before the early returns below - otherwise phase transitions from
+// 'selecting' to 'live' would change the hook count, violating Rules of Hooks.
+const subCount = snap.agents.filter(a => a.kind === "sub").length;
+useEffect(() => {
+	if (subCount > 0 && !autoOpenedRef.current) {
+		autoOpenedRef.current = true;
+		setRailOpen(true);
+	}
+}, [subCount]);
+
 
 
 	if (agent.phase === "connecting" || agent.phase === "ended") {
@@ -99,14 +111,7 @@ export function App({ initialSessionId }: { initialSessionId?: string }): ReactN
 		);
 	}
 
-	// Auto-open the rail the first time a subagent appears.
-	const subCount = snap.agents.filter(a => a.kind === "sub").length;
-	useEffect(() => {
-		if (subCount > 0 && !autoOpenedRef.current) {
-			autoOpenedRef.current = true;
-			setRailOpen(true);
-		}
-	}, [subCount]);
+
 
 	const agentIds = new Set(snap.agents.map(a => a.id));
 	const toolHost: ToolRenderHost = {
