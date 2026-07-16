@@ -8,7 +8,9 @@
 │  React SPA (main.js + main.css + styles.css)                     │
 │  ┌──────────────────────────────────────────┐                    │
 │  │  collab-web 复用: Transcript, HeaderBar, │                    │
-│  │  Composer, Banners, 5 个 CSS 文件          │                    │
+│  │  Composer, Banners, Toasts,              │                    │
+│  │  AgentsPanel, AgentDrawer,               │                    │
+│  │  6 个 CSS 文件                              │                    │
 │  ├──────────────────────────────────────────┤                    │
 │  │  自研: App.tsx, useAgent.ts,              │                    │
 │  │  SessionPicker.tsx (移动端适配),           │                    │
@@ -33,12 +35,14 @@
 │                                                                   │
 │  CollabHost (多 AgentSession 池)                                  │
 │    ┌─────────────────────────────────────────────────────┐       │
-│    │  #slots: Map<path, { session, unsubEvents, unsubTitle }>│       │
+│    │  #slots: Map<path, { session, eventBus,             │       │
+│    │    unsubEvents, unsubTitle, unsubBus, agentIds }>    │       │
 │    │    "path/A.jsonl" → AgentSession A (独立 Agent)      │       │
 │    │    "path/B.jsonl" → AgentSession B (独立 Agent)      │       │
 │    │  每个槽独立处理 prompt，事件按 sessionPath 过滤广播    │       │
 │    └─────────────────────────────────────────────────────┘       │
-│  forkSession(path) → SessionManager.open + createAgentSession    │
+│  forkSession(path?) → SessionManager.open + createAgentSession    │
+│    + 每个 session 独立的 EventBus（用于子 agent 事件）              │
 │                                                                   │
 │  WebSocket /ws                                                    │
 │    每个连接 = 一个 client，按 sessionPath 独立路由                   │
@@ -49,10 +53,11 @@
 ```
 
 **数据流向**：
-- **浏览器/TUI → 服务器**：GuestFrame（prompt/abort/resume/new）经 WebSocket
-- **服务器 → 浏览器/TUI**：HostFrame（event/entry/state/welcome/snapshot-chunk/reset）经 WebSocket，按 sessionPath 过滤
+- **浏览器/TUI → 服务器**：GuestFrame（prompt/abort/resume/new/agent-cmd/fetch-transcript）经 WebSocket
+- **服务器 → 浏览器/TUI**：HostFrame（event/entry/state/welcome/snapshot-chunk/reset/agents/bus/transcript）经 WebSocket，按 sessionPath 过滤
 - **多客户端协作**：同一 sessionPath 的客户端共享同一个 AgentSession 槽，事件互相可见
 - **多客户端独立**：不同 sessionPath 的客户端使用各自的 AgentSession 槽，互不干扰
+- **子 agent 事件**：AgentSession 的 EventBus 上订阅 `task:subagent:progress`/`lifecycle` 通道 → 转发为 `bus` 帧
 
 ## 二、架构决策
 
@@ -70,7 +75,7 @@
 
 **问题**：单 AgentSession 只能同时处理一个会话。两个标签页在不同会话上发消息时，`switchSession` 会导致事件归属混乱。
 
-**方案**：CollabHost 维护 `#slots: Map<path, { session, ... }>`，每个不同的会话路径有自己独立的 AgentSession 实例。`forkSession(path)` 工厂通过 `SessionManager.open(path)` + `createAgentSession()` 创建完全独立的会话（包括独立的 Agent 实例）。
+**方案**：CollabHost 维护 `#slots: Map<path, { session, ... }>`，每个不同的会话路径有自己独立的 AgentSession 实例。`forkSession(path?)` 工厂通过 `SessionManager.open(path)` + `createSession()` 创建完全独立的会话（包括独立的 Agent 实例和 EventBus）。
 
 **效果**：
 - 不同会话的 prompt 完全并发，互不阻塞
@@ -88,17 +93,22 @@ TUI 通过 `omp --web-client <url>` 连接到 Web 服务器，作为 WebSocket �
 
 ### 2.4 HostFrame 协议
 
-复用 collab-web 的 wire 协议（`packages/wire/src/index.ts`）：
+复用 collab-web 的 wire 协议（`packages/wire/src/index.ts`），加上 web-mode 扩展：
 
 | 方向 | 帧类型 | 用途 |
 |------|-------|------|
-| S→C | `welcome` | 会话快照元数据（header + state + entryCount） |
+| S→C | `welcome` | 会话快照元数据（header + state + agents + entryCount） |
 | S→C | `snapshot-chunk` | 分批历史消息（每批 50 条，最后一个 `final:true`） |
-| S→C | `event` | Agent 事件（message_start/end, tool_execution, agent_start/end 等） |
+| S→C | `event` | Agent 事件（message_start/end, tool_execution, agent_start/end, notice, auto_retry/compaction 等） |
 | S→C | `entry` | 单条消息固化为 SessionEntry |
 | S→C | `state` | 会话状态更新 |
+| S→C | `agents` | AgentRegistry 快照（debounced 100ms） |
+| S→C | `bus` | EventBus 镜像（task:subagent:progress/lifecycle 通道） |
+| S→C | `transcript` | fetch-transcript 请求的增量读取响应 |
 | C→S | `prompt` | 用户发送消息 |
 | C→S | `abort` | 中止当前客户端所在会话的 Agent |
+| C→S | `agent-cmd` | 子 agent 控制（chat/kill/revive） |
+| C→S | `fetch-transcript` | 请求子 agent transcript 增量读取 |
 
 **Web mode 扩展帧**：
 
@@ -107,6 +117,7 @@ TUI 通过 `omp --web-client <url>` 连接到 Web 服务器，作为 WebSocket �
 | C→S | `resume { path }` | 切换到指定会话（仅对该客户端生效） |
 | C→S | `new` | 新建会话（仅对该客户端生效） |
 | S→C | `reset` | 通知客户端清空状态，随后收到 snapshot-chunk + welcome |
+| S→C | `bye { reason }` | 服务器关闭连接（guest 进入 ended 阶段） |
 | S→C | `error { message }` | 错误通知 |
 
 ### 2.5 URL 路由
@@ -170,21 +181,30 @@ TUI 进入正常交互循环（getUserInput → submitInteractiveInput）
 ```
 main.tsx (入口)
   ├── 解析 /session/<id> URL → initialSessionId
-  ├── 导入 collab-web CSS (5 个文件)
+  ├── 导入 collab-web CSS (6 个文件：tokens/base/transcript/shell/tool-render/agents)
   ├── 导入 styles.css
   └── 渲染 <App initialSessionId={...} />
        │
        App.tsx
        ├── useAgent({ initialSessionId }) hook
+       ├── 状态: railOpen, selectedId, subCount (自动展开)
        ├── popstate 监听 (后退回到 /)
        ├── 连接屏 (connecting / ended)
        ├── 会话选择器 (selecting) → <SessionPicker>
        │    └── SVG 图标 + 骨架屏 + 移动端适配
        └── 主界面 (live)
-            ├── <HeaderBar> onLeave → reconnect + pushState("/")
-            ├── <Transcript>
+            ├── <HeaderBar> subCount + onToggleRail
+            ├── <main> flex-row 布局
+            │    ├── <Transcript host={toolHost}>
+            │    │    └── 任务卡片中 agent ID 可点击 → openAgent
+            │    ├── <aside class="sh-rail"> (railOpen 时)
+            │    │    └── <AgentsPanel> 子 agent 列表
+            │    └── <div class="sh-rail-backdrop"> 移动端遮罩
+            ├── <AgentDrawer> selectedId 时打开
+            │    └── kill/revive/chat + 1.2s 轮询 transcript
             ├── <Composer>
-            └── <Banners>
+            ├── <Banners>
+            └── <Toasts> notices（reconnect/error/auto_retry/auto_compaction）
 ```
 
 ### 4.2 复用关系
@@ -192,12 +212,14 @@ main.tsx (入口)
 | 来源 | 组件/文件 | 用途 |
 |---|---|---|
 | collab-web | Transcript, HeaderBar, Composer, Banners | 核心交互组件 |
-| collab-web | tokens.css, base.css, transcript.css, shell.css, tool-render.css | 设计系统 |
-| 自研 | App.tsx | 三态路由 + URL 管理 |
-| 自研 | useAgent.ts | WebSocket 状态管理 + initialSessionId 自动解析 |
+| collab-web | Toasts, AgentsPanel, AgentDrawer | 子 agent 通知 + 面板 |
+| collab-web | ToolRenderHost (types) | 子 agent drill-down 契约 |
+| collab-web | tokens.css, base.css, transcript.css, shell.css, tool-render.css, agents.css | 设计系统 |
+| 自研 | App.tsx | 三态路由 + URL 管理 + rail 状态 |
+| 自研 | useAgent.ts | WebSocket 状态管理（agents/progress/lifecycle/notices） |
 | 自研 | SessionPicker.tsx | 会话选择（SVG 图标 + 骨架屏 + 移动端响应式） |
-| 自研 | collab-bridge.ts | 数据格式适配 |
-| 自研 | styles.css | 布局 + picker 样式 + 移动端断点 |
+| 自研 | collab-bridge.ts | HostFrame → GuestSnapshot 适配 |
+| 自研 | styles.css | 布局覆盖（flex-row 修复 rail）+ picker 样式 |
 
 ## 五、核心模块详解
 
@@ -205,14 +227,27 @@ main.tsx (入口)
 
 ```typescript
 class CollabHost {
-    #slots = Map<string, { session: AgentSession; unsubEvents; unsubTitle }>;
-    #clientSessions = Map<client, string>;  // client → sessionPath
+    #slots = Map<string, {
+        session: AgentSession;
+        eventBus: EventBus;
+        unsubEvents: () => void;
+        unsubTitle: () => void;
+        unsubBus: () => void;      // 取消 EventBus 订阅
+        agentIds: Set<string>;     // 该会话的子 agent ID 集合
+        agentsDebounce: Timer | undefined;
+    }>();
+    #clientSessions = Map<client, string>;
+    #registryUnsub: () => void;    // AgentRegistry.onChange 监听
+
+    constructor(opts) {
+        this.#registryUnsub = AgentRegistry.global().onChange(() => this.#scheduleAllAgentsBroadcasts());
+    }
 
     // 按客户端切换会话（仅该客户端收到 reset+welcome）
     async switchSessionForClient(client, path) {
         const slot = await this.#getOrCreateSlot(path);
         this.#clientSessions.set(client, path);
-        this.#sendResetAndWelcome(client, slot.session);
+        this.#sendResetAndWelcome(client, slot);
     }
 
     // 按客户端路由 prompt（确保加载该客户端的会话后处理）
@@ -224,13 +259,40 @@ class CollabHost {
     }
 
     // 事件广播：仅发给同一 sessionPath 的客户端
-    #installSlot(path, session) {
+    #installSlot(path, session, eventBus) {
+        // 1. AgentSession 事件
         session.subscribe((event) => {
             for (const c of this.#clients) {
                 if (this.#clientSessions.get(c) !== path) continue;
                 sendFrame(c, { t: "event", event });
             }
         });
+        // 2. EventBus 子 agent 事件
+        for (const channel of BUS_CHANNELS) {
+            eventBus.on(channel, data => {
+                if (channel === TASK_SUBAGENT_LIFECYCLE_CHANNEL) {
+                    this.#slots.get(path)!.agentIds.add((data as SubagentLifecyclePayload).id);
+                }
+                for (const c of this.#clients) {
+                    if (this.#clientSessions.get(c) !== path) continue;
+                    sendFrame(c, { t: "bus", channel, data });
+                }
+            });
+        }
+    }
+
+    // 3. AgentRegistry 变化 → 重新构建所有 slot 的 agents 快照
+    #scheduleAllAgentsBroadcasts() {
+        for (const [path, slot] of this.#slots) {
+            slot.agentsDebounce = setTimeout(() => {
+                slot.agentsDebounce = undefined;
+                const agents = this.#snapshotAgents(slot);
+                for (const c of this.#clients) {
+                    if (this.#clientSessions.get(c) !== path) continue;
+                    sendFrame(c, { t: "agents", agents });
+                }
+            }, AGENTS_DEBOUNCE_MS);
+        }
     }
 }
 ```
@@ -238,15 +300,18 @@ class CollabHost {
 **forkSession 工厂**（在 main.ts 中创建）：
 
 ```typescript
-webOpts.forkSession = async (path) => {
-    const mgr = await SessionManager.open(path, sessionDir);
+webOpts.forkSession = async (sessionPath?: string) => {
+    const mgr = sessionPath
+        ? await SessionManager.open(sessionPath, sessionDir)
+        : SessionManager.create(cwd, sessionDir);  // 无参 = 新建空会话
+    const eventBus = new EventBus();
     const { session } = await createSession({
         ...sessionOptions,
         sessionManager: mgr,
-        eventBus: new EventBus(),
+        eventBus,                            // 每个 session 独立的 EventBus
         preloadedExtensions: extensionsResult,
     });
-    return session;
+    return { session, eventBus };
 };
 ```
 
@@ -277,7 +342,7 @@ class WebGuestLink {
 **帧顺序处理**：服务器发送顺序是 `snapshot-chunk` → `welcome`。WebGuestLink 的 `#handleFrame` 需要处理两种到达顺序：
 
 - `snapshot-chunk` 先到：累积 entries，仅在 `frame.final && #pendingHeader` 时完成
-- `welcome` 先到：设置 header/state/entryCount，在 entries 已满时完成
+- `welcome` 先到：设置 header/state/entryCount，在 entries 已满时也触发完成
 - 两者都到达后才调用 `#finalizeSnapshot()` → `#welcomed = true`
 
 ### 5.3 SessionPicker - 移动端适配
@@ -296,18 +361,83 @@ class WebGuestLink {
 
 **骨架屏**：加载中显示 5 行 shimmer 动画占位条。
 
-### 5.4 useAgent.ts - initialSessionId 自动解析
+### 5.4 useAgent.ts - 状态管理
 
 ```typescript
 useAgent({ initialSessionId }) {
-    // ...
+    // URL 解析 → 自动选择会话
     useEffect(() => {
         if (!initialId || resolved || phase !== "selecting") return;
         const match = sessionList?.local.find(s => s.id.startsWith(initialId))
                    ?? sessionList?.all.find(s => s.id.startsWith(initialId));
         if (match) { setResolved(true); selectSession(match.path); }
     }, [initialId, phase, sessionList, ...]);
+
+    // 帧处理 (核心)
+    switch (frame.t) {
+        case "welcome": { /* state + agents + clear progress/lifecycle */ }
+        case "reset": { /* 清空状态 → 准备接收新 snapshot */ }
+        case "entry": { /* 追加到 entries */ }
+        case "event": { handleEvent(frame.event, { setStream, ..., pushNotice }); }
+        case "state": { /* 会话状态 */ }
+        case "agents": { setAgents(frame.agents); }
+        case "bus": {
+            if (frame.channel === "task:subagent:progress") setProgress(...);
+            else if (frame.channel === "task:subagent:lifecycle") setLifecycle(...);
+        }
+        case "transcript": { /* 解析 fetch-transcript 响应 */ }
+        case "bye": { setPhase("ended"); setEndedReason(frame.reason); }
+        ...
+    }
 }
+```
+
+**handleEvent 新增 notice 处理**：
+
+```typescript
+case "notice": ctx.pushNotice(event.level, event.message); break;
+case "auto_retry_start": ctx.pushNotice("info", `retry ${attempt}/${max}: ${err}`); break;
+case "auto_compaction_start": ctx.pushNotice("info", `compacting context (${reason})`); break;
+case "auto_compaction_end": ctx.pushNotice("info", `context compacted`); break;
+```
+
+### 5.5 App.tsx - 子 agent UI 集成
+
+```typescript
+// 状态
+const [railOpen, setRailOpen] = useState(false);
+const [selectedId, setSelectedId] = useState<string | null>(null);
+
+// 子 agent 首次出现时自动展开侧边栏
+useEffect(() => {
+    if (subCount > 0 && !autoOpenedRef.current) {
+        autoOpenedRef.current = true;
+        setRailOpen(true);
+    }
+}, [subCount]);
+
+// ToolRenderHost: 让任务卡片中的子 agent ID 可点击
+const toolHost: ToolRenderHost = {
+    hasAgent: id => agentIds.has(id),
+    openAgent: id => { if (agentIds.has(id)) setSelectedId(id); },
+};
+
+// 布局
+<main className="sh-main"> {/* flex-direction: row */}
+    <section className="sh-content" data-rail={railOpen}>
+        <Transcript host={toolHost} ... />
+    </section>
+    {railOpen && (
+        <>
+            <div className="sh-rail-backdrop" onClick={...} />
+            <aside className="sh-rail">
+                <AgentsPanel agents progress lifecycle selectedId onSelect />
+            </aside>
+        </>
+    )}
+</main>
+{drawerAgent && <AgentDrawer agent progress client host onClose />}
+<Toasts notices={snap.notices} />
 ```
 
 ## 六、构建与启动
@@ -435,23 +565,67 @@ omp --web-client http://localhost:3000 --resume /path/to/session.jsonl
 
 **修复**：`setConfirming`/`setDeleting` 改用函数式更新 `prev => prev === path ? ... : prev`，仅当状态仍指向当前行时才修改。
 
+### 7.17 子 agent UI 缺失（feature）
+
+**现象**：任务工具生成子 agent 时，浏览器端无法看到子 agent 列表，也无法 drill-down 到子 agent 的 transcript。TUI 端可见但浏览器端空白。
+
+**修复**：
+1. 服务端：CollabHost 订阅每个 slot 的 EventBus（`task:subagent:progress`/`lifecycle` 通道），转发为 `bus` 帧
+2. 服务端：监听 `AgentRegistry.global().onChange()`，对每个 slot 重新构建 agents 快照并 debounce（100ms）发送 `agents` 帧
+3. 客户端：useAgent 新增 `agents`/`progress`/`lifecycle`/`notices` 状态，对应帧处理
+4. UI：App.tsx 渲染 `AgentsPanel`（rail 侧边栏）和 `AgentDrawer`（点击 agent 后的抽屉），传递 `ToolRenderHost` 让任务卡片中 agent ID 可点击
+
+### 7.18 "no saved sessions yet" 误显示（P2）
+
+**现象**：API 返回 88 个会话但 picker 仍显示 "no saved sessions yet"。
+
+**原因**：重写 App.tsx 时把 `list={...}` 写成 `sessionList={...}`，且漏了 `loading` prop，多了不存在的 `onReconnect`——SessionPicker 接收到的 `list` 是 undefined，rows 为空。
+
+**修复**：使用正确的 prop 名 `list={agent.sessionList}`、添加 `loading={!agent.sessionList && !agent.sessionListError}`、移除不存在的 `onReconnect`。
+
+### 7.19 rail 出现在 transcript 下方而非右侧（P1）
+
+**现象**：agents 面板显示在 transcript 区域下方，而不是作为右侧 sidebar。
+
+**原因**：`styles.css` 把 `.sh-main` 覆盖为 `flex-direction: column`，而 collab-web `shell.css` 期望默认的 `flex-direction: row`（rail 在右侧 300px 宽）。这是 web client 的旧 CSS 残留——原本只有 transcript 和 composer，没有 sidebar。
+
+**修复**：`styles.css` 中 `.sh-main` 改回 `flex-direction: row`，rail 立即出现在右侧。
+
+### 7.20 debug logger.info 残留（P3）
+
+**现象**：服务端 collab-host.ts 和客户端 web-guest.ts 中残留调试用的 `logger.info` 调用，生产环境会污染日志。
+
+**修复**：删除所有调试 log 调用（6 处），保留必要的 `logger.warn`/`logger.error`。
+
+### 7.21 handleEvent 缺 pushNotice 注入（P2）
+
+**现象**：notice 事件处理时 `ctx.pushNotice` 为 undefined，调用即 crash。
+
+**修复**：`useAgent.ts` 的 `case "event"` 处理中将 `pushNotice` 加入 `handleEvent` 的 ctx 参数。
+
+### 7.22 web-mode.ts console.error 违规（P3）
+
+**现象**：`coding-agent` 禁止使用 `console.log/error`，但 `web-mode.ts` 在 WS upgrade 和启动/shutdown 处有 6 处 `console.error` 调用。
+
+**修复**：全部替换为 `logger.debug`/`logger.info`，`logger.debug` 的 meta 参数统一用对象包装。
+
 ## 八、文件清单
 
 ### 新增文件
 
 ```
 packages/coding-agent/src/modes/web/
-├── web-mode.ts                   服务端入口 (HTTP + WS + REST API)
-├── collab-host.ts                CollabHost (多 AgentSession 池 + 按客户端路由)
+├── web-mode.ts                   服务端入口 (HTTP + WS + REST API + agent-cmd/fetch-transcript)
+├── collab-host.ts                CollabHost (多 AgentSession 池 + 按客户端路由 + EventBus 镜像 + agents 广播)
 ├── web-guest.ts                  WebGuestLink (TUI 客户端 WebSocket 桥接)
 └── client/
     ├── index.html                SPA 外壳 (<base href="/"> + theme init)
-    ├── main.tsx                  入口 (URL 解析 + CSS 导入)
-    ├── App.tsx                   三态路由 + URL 管理 + popstate
-    ├── useAgent.ts               WebSocket hook + initialSessionId 自动解析
-    ├── SessionPicker.tsx          会话选择 (SVG 图标 + 骨架屏 + 移动端)
-    ├── collab-bridge.ts          数据格式适配
-    └── styles.css                布局 + picker 样式 + 移动端断点
+    ├── main.tsx                  入口 (URL 解析 + 6 个 CSS 导入)
+    ├── App.tsx                   三态路由 + URL 管理 + popstate + rail/drawer
+    ├── useAgent.ts               WebSocket hook (agents/progress/lifecycle/notices + 帧处理)
+    ├── SessionPicker.tsx         会话选择 (SVG 图标 + 骨架屏 + 移动端)
+    ├── collab-bridge.ts          HostFrame → GuestSnapshot 适配（含 sendAgentCmd/fetchTranscript）
+    └── styles.css                布局 (flex-row 修复 rail) + picker 样式 + 移动端断点
 
 packages/coding-agent/scripts/
 └── build-web-client.ts           前端构建脚本
@@ -463,18 +637,18 @@ packages/coding-agent/scripts/
 |---|---|
 | `src/cli/args.ts` | 添加 `webClient?: string` 字段 |
 | `src/cli/flag-tables.ts` | 添加 `--web-client` 到 STRING_SETTERS；`--mode` 添加 `"web"` |
-| `src/main.ts` | web 模式分发；`forkSession` 工厂；`runInteractiveMode` 添加 `webClient` 参数；WebGuestLink 初始化 |
+| `src/main.ts` | web 模式分发；`forkSession` 工厂返回 `{session, eventBus}`；`runInteractiveMode` 添加 `webClient` 参数；WebGuestLink 初始化 |
 | `src/modes/types.ts` | 添加 `webGuest?: WebGuestLink` 到 InteractiveModeContext |
 | `src/modes/interactive-mode.ts` | 添加 `webGuest` 字段 |
 | `src/modes/controllers/input-controller.ts` | prompt/abort/retry 路由检查 `ctx.webGuest` |
 | `tsconfig.json` | 排除 `client/` 目录 |
 | `package.json` | 添加 `gen:web-client` 脚本 |
-| `packages/collab-web/package.json` | 添加 `exports` 字段 |
-| `packages/wire/src/index.ts` | `HostFrame` 联合类型添加 `{ t: "reset" }` |
+| `packages/collab-web/package.json` | 新增 `agents-panel`/`agent-drawer`/`agents-css`/`tool-render` exports |
+| `packages/wire/src/index.ts` | `HostFrame` 联合类型添加 `{ t: "reset" }` 变体；`bus`/`agents`/`transcript`/`agent-cmd`/`fetch-transcript` 帧定义 |
 
 ## 九、技术要点
 
-1. **多 AgentSession 池**：每个会话路径有独立的 AgentSession（含独立 Agent），不同会话的 prompt 完全并发，互不阻塞。事件按 sessionPath 过滤广播。
+1. **多 AgentSession 池**：每个会话路径有独立的 AgentSession（含独立 Agent 和 EventBus），不同会话的 prompt 完全并发，互不阻塞。事件按 sessionPath 过滤广播。
 
 2. **TUI ↔ Web 双向同步**：WebGuestLink 复用 CollabGuestLink 模式（副本文件 + EventController 事件注入 + WebSocket prompt 转发）。InputController 优先检查 `ctx.webGuest` 路由。
 
@@ -484,4 +658,17 @@ packages/coding-agent/scripts/
 
 5. **帧顺序鲁棒性**：`snapshot-chunk` 和 `welcome` 可在任意顺序到达，通过 `#pendingHeader` 守卫和双触发完成确保 `#welcomed` 正确设置。
 
-6. **forkSession 工厂**：`SessionManager.open(path)` + `createAgentSession()` 创建完全独立的 AgentSession，包括独立的 Agent 实例和 EventBus。
+6. **forkSession 工厂**：`SessionManager.open(path)` + `createSession()` + 独立 `EventBus` 创建完全独立的 AgentSession。无参调用时用 `SessionManager.create` 新建空会话。
+
+7. **子 agent 数据通道**（3 个）：
+   - **AgentSnapshot**：AgentRegistry.onChange → debounced 100ms → `agents` 帧
+   - **SubagentProgressPayload**：EventBus.on('task:subagent:progress') → `bus` 帧
+   - **SubagentLifecyclePayload**：EventBus.on('task:subagent:lifecycle') → `bus` 帧（含 agentIds 跟踪）
+
+8. **ToolRenderHost drill-down**：任务卡片中的 agent ID 通过 `host.openAgent(id)` 打开 AgentDrawer，实现嵌套 agent 递归查看。
+
+9. **Notice/Toast 系统**：服务端将 `notice`/`auto_retry_start`/`auto_compaction_start`/`auto_compaction_end` 事件转发为 `{t:"event"}` 帧，客户端 useAgent 捕获后 `pushNotice` 推入 `notices` 数组，`<Toasts notices={...}>` 按 level 自动关闭（info 4s, warning 8s, error 手动）。
+
+10. **fetch-transcript 增量读取**：1.2s 轮询，4MB 上限，JSONL 行边界保护（不切分不完整行/UTF-8 字符），通过 `pendingTranscripts` Map + `reqId` 关联 promise。
+
+11. **CSS 布局修复**：`styles.css` 中 `.sh-main` 必须保持 `flex-direction: row`（collab-web `shell.css` 默认值）以让 `.sh-rail` 出现在右侧 300px 宽的 sidebar。
