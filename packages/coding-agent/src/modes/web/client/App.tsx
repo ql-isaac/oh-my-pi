@@ -26,27 +26,39 @@ export function App({ initialSessionId }: { initialSessionId?: string }): ReactN
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const autoOpenedRef = useRef(false);
 
-	// Handle browser back/forward: if the URL returns to /, the server
-	// doesn't emit a reset frame - just go back to the picker.
+	// Handle browser back/forward. Two cases:
+	// - pathname is /                          -> return to picker (reconnect)
+	// - pathname is /session/<id> (different  -> reopen that session
+	//   from the current one, e.g. user backed
+	//   out of a session into another one)
 	useEffect(() => {
 		const onPop = () => {
 			const path = window.location.pathname;
-			if (path === "/") {
-				agent.reconnect();
+			if (path === "/") { agent.reconnect(); return; }
+			const m = path.match(/^\/session\/([^/]+)$/);
+			if (m) {
+				const id = m[1];
+				const match = agent.sessionList?.local.find(s => s.id.startsWith(id))
+					?? agent.sessionList?.all.find(s => s.id.startsWith(id));
+				if (match) agent.selectSession(match.path);
 			}
 		};
 		window.addEventListener("popstate", onPop);
 		return () => window.removeEventListener("popstate", onPop);
 	}, [agent.reconnect, agent.selectSession, agent.sessionList]);
 
-	// Auto-open the rail the first time a subagent appears.
-	const subCount = snap.agents.filter(a => a.kind === "sub").length;
+	// Drive URL from the live session header. The welcome frame sets the
+	// real session id; resetLocal() and reconnect() clear it back to null.
+	// - header set -> /session/<id> (the shareable, direct-access URL)
+	// - header null -> / (the picker)
+	// pushState (not replaceState) so the back button moves from a session
+	// back to the picker, and from the picker back to whatever preceded it.
+	const headerId = snap.header?.id;
 	useEffect(() => {
-		if (subCount > 0 && !autoOpenedRef.current) {
-			autoOpenedRef.current = true;
-			setRailOpen(true);
-		}
-	}, [subCount]);
+		const target = headerId ? `/session/${headerId}` : "/";
+		if (window.location.pathname !== target) history.pushState(null, "", target);
+	}, [headerId]);
+
 
 	if (agent.phase === "connecting" || agent.phase === "ended") {
 		return (
@@ -74,17 +86,27 @@ export function App({ initialSessionId }: { initialSessionId?: string }): ReactN
 				cwd={agent.sessionList?.cwd ?? ""}
 				onSelect={(path) => {
 					agent.selectSession(path);
-					history.pushState(null, "", "/");
+					// URL is updated by the header-driven useEffect above once the
+					// server's welcome frame arrives with the real session id.
 				}}
 				onNew={() => {
 					agent.newSession();
-					history.pushState(null, "", "/");
+					// Same: welcome frame's header.id drives the URL.
 				}}
 				onRefresh={agent.refreshSessionList}
 				onDelete={agent.deleteSession}
 			/>
 		);
 	}
+
+	// Auto-open the rail the first time a subagent appears.
+	const subCount = snap.agents.filter(a => a.kind === "sub").length;
+	useEffect(() => {
+		if (subCount > 0 && !autoOpenedRef.current) {
+			autoOpenedRef.current = true;
+			setRailOpen(true);
+		}
+	}, [subCount]);
 
 	const agentIds = new Set(snap.agents.map(a => a.id));
 	const toolHost: ToolRenderHost = {
@@ -101,7 +123,7 @@ export function App({ initialSessionId }: { initialSessionId?: string }): ReactN
 				subCount={subCount}
 				railOpen={railOpen}
 				onToggleRail={() => setRailOpen(open => !open)}
-				onLeave={() => { agent.reconnect(); history.pushState(null, "", "/"); }}
+				onLeave={() => { agent.reconnect(); }}
 			/>
 			<main className="sh-main">
 				<section className="sh-content" data-rail={railOpen ? "true" : "false"}>
