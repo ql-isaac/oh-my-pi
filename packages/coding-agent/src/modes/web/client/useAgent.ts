@@ -83,6 +83,7 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 		setStreamDoneState(d);
 	}, []);
 	const [activeTools, setActiveTools] = useState<ReadonlyMap<string, ActiveTool>>(new Map());
+	const [working, setWorking] = useState(false);
 	const [state, setState] = useState<SessionState | null>(null);
 	const [header, setHeader] = useState<SessionHeader | null>(null);
 	const [agents, setAgents] = useState<readonly AgentSnapshot[]>([]);
