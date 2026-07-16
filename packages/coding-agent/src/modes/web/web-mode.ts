@@ -18,6 +18,8 @@ import { getProjectDir, getSessionsDir, logger } from "@oh-my-pi/pi-utils";
 import { listAllSessions, listSessions, type SessionInfo } from "../../session/session-listing";
 
 import { FileSessionStorage } from "../../session/session-storage";
+import type { AgentSession } from "../../session/agent-session";
+import type { EventBus } from "../../utils/event-bus";
 import { CollabHost } from "./collab-host";
 // ---------------------------------------------------------------------------
 // Options
@@ -27,8 +29,8 @@ export interface WebModeOptions {
 	port?: number;
 	host?: string;
 	open?: boolean;
-	/** Factory: creates a fresh AgentSession for a session file path. */
-	forkSession?: (path: string) => Promise<import("../../session/agent-session").AgentSession>;
+	/** Factory: creates a fresh AgentSession + its EventBus. With a path, opens an existing session; without, creates a new empty one. */
+	forkSession?: (path?: string) => Promise<{ session: AgentSession; eventBus: EventBus }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -75,13 +77,13 @@ export async function runWebMode(
 						return new Response("forbidden", { status: 403 });
 					}
 				}
-				console.error("[web] WS upgrade request from", url.host);
+				logger.debug("web-mode: WS upgrade request from", { host: url.host });
 				const upgraded = server.upgrade(req);
 				if (!upgraded) {
-					console.error("[web] WS upgrade failed");
+					logger.debug("web-mode: WS upgrade failed");
 					return new Response("WebSocket upgrade failed", { status: 400 });
 				}
-				console.error("[web] WS upgrade succeeded");
+				logger.debug("web-mode: WS upgrade succeeded");
 				return undefined;
 			}
 			// REST API
@@ -158,7 +160,7 @@ export async function runWebMode(
 
 		websocket: {
 			open(ws) {
-				console.error("[web] WS client connected");
+				logger.debug("web-mode: WS client connected");
 				// Register the client but don't send welcome. The first welcome ships
 				// only after the user picks a session (or hits "new session");
 				// sending it eagerly here would race the picker UI and auto-flip
@@ -167,9 +169,7 @@ export async function runWebMode(
 					try {
 						const json = JSON.stringify(obj);
 						ws.send(json);
-					} catch (e) {
-						console.error("[web] WS send error:", e);
-					}
+					} catch (e) { logger.warn("web-mode: WS send error", { error: String(e) }); }
 				} };
 				clientsByWs.set(ws, client);
 				collabHost.addClient(client);
@@ -218,13 +218,21 @@ export async function runWebMode(
 								client.send(JSON.stringify({ t: "error", message: msg }));
 							});
 						}
+					} else if (t === "agent-cmd") {
+						const client = clientsByWs.get(ws);
+						if (client) collabHost.handleAgentCmd(client, frame.cmd as "chat" | "kill" | "revive", frame.agentId as string, frame.text as string | undefined);
+					} else if (t === "fetch-transcript") {
+						const client = clientsByWs.get(ws);
+						if (client) collabHost.handleFetchTranscript(client, frame.reqId as number, frame.agentId as string, frame.fromByte as number).catch((err: unknown) => {
+							logger.warn("web-mode: fetchTranscript rejected", { error: String(err) });
+						});
 					}
 				} catch {
 					// ignore invalid frames
 				}
 			},
 			close(ws) {
-				console.error("[web] WS client disconnected");
+				logger.debug("web-mode: WS client disconnected");
 				const client = clientsByWs.get(ws);
 				if (client) {
 					collabHost.removeClient(client);
@@ -235,18 +243,18 @@ export async function runWebMode(
 	});
 
 	const url = `http://${host}:${server.port}`;
-	console.error(`[web] server listening at ${url}`);
+	logger.info(`web-mode: server listening at ${url}`);
 	if (options.open) {
 		void Bun.$`open ${url}`.nothrow().quiet();
 	}
 
 	process.on("SIGINT", async () => {
-		console.error("\n[web] shutting down...");
+		logger.info("web-mode: shutting down...");
 		server.stop();
 		process.exit(0);
 	});
 	process.on("SIGTERM", async () => {
-		console.error("[web] shutting down...");
+		logger.info("web-mode: shutting down...");
 		server.stop();
 		process.exit(0);
 	});
