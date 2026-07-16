@@ -1,8 +1,5 @@
 /**
-		if (event.type === "message_start" && event.message.role === "assistant") { this.#assistantStreamSynced = true; logger.info("web-guest event", { type: event.type, role: event.message.role }); }
-		else if (event.type === "message_update" && event.message.role === "assistant" && !this.#assistantStreamSynced) { this.#assistantStreamSynced = true; void this.#ctx.eventController.handleEvent({ type: "message_start", message: event.message }); }
-		else { logger.info("web-guest event", { type: event.type }); }
-		void this.#ctx.eventController.handleEvent(event);
+ * WebGuestLink - TUI-side WebSocket client that connects to the web mode
  * server and renders the remote session in the terminal.
  */
 
@@ -71,7 +68,7 @@ export class WebGuestLink {
 		await this.#restoreLocalSession();
 	}
 
-	sendPrompt(text: string, _images?: ImageContent[]): void { logger.info("web-guest sendPrompt", { text: text.slice(0, 40) }); this.#send({ t: "prompt", text }); }
+	sendPrompt(text: string, _images?: ImageContent[]): void { this.#send({ t: "prompt", text }); }
 	sendAbort(): void { this.#send({ t: "abort" }); }
 
 	async #openSocket(): Promise<void> {
@@ -83,7 +80,7 @@ export class WebGuestLink {
 		await promise;
 		ws.onmessage = (ev: MessageEvent) => {
 			let frame: HostFrame;
-			try { frame = JSON.parse(ev.data as string) as HostFrame; logger.info("web-guest recv", { t: frame.t }); }
+			try { frame = JSON.parse(ev.data as string) as HostFrame; }
 			catch { logger.warn("web-guest: received non-JSON frame"); return; }
 			this.#applyChain = this.#applyChain.then(() => this.#handleFrame(frame)).catch(err => logger.warn("web-guest frame fail", { type: frame.t, error: String(err) }));
 		};
