@@ -6,6 +6,7 @@ import "@oh-my-pi/collab-web/base-css";
 import "@oh-my-pi/collab-web/transcript-css";
 import "@oh-my-pi/collab-web/shell-css";
 import "@oh-my-pi/collab-web/tool-render-css";
+import "@oh-my-pi/collab-web/agents-css";
 
 // Import our layout overrides
 import "./styles.css";
