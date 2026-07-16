@@ -3,7 +3,7 @@
  * so the bridge just wraps it into GuestSnapshot for Composer.
  */
 
-import type { GuestClient, GuestSnapshot, SessionHeader, AgentSnapshot, SubagentProgressPayload, SubagentLifecyclePayload } from "../../../collab-web/src/lib/client";
+import type { GuestClient, GuestSnapshot, SessionHeader } from "../../../collab-web/src/lib/client";
 import type { UseAgentReturn } from "./useAgent";
 
 export function buildGuestClient(agent: UseAgentReturn): GuestClient {
@@ -11,6 +11,8 @@ export function buildGuestClient(agent: UseAgentReturn): GuestClient {
 		sendPrompt(text: string) { agent.sendPrompt(text); },
 		sendAbort() { agent.abort(); },
 		sendUiResponse() {},
+		sendAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text?: string) { agent.sendAgentCmd(cmd, agentId, text); },
+		fetchTranscript(agentId: string, fromByte: number) { return agent.fetchTranscript(agentId, fromByte); },
 	} as unknown as GuestClient;
 }
 
@@ -28,15 +30,15 @@ export function buildSnapshot(agent: UseAgentReturn): GuestSnapshot {
 		header,
 		entries: agent.entries,
 		state: agent.state,
-		agents: Object.freeze([]) as readonly AgentSnapshot[],
-		progress: new Map<string, SubagentProgressPayload>(),
-		lifecycle: new Map<string, SubagentLifecyclePayload>(),
+		agents: agent.agents,
+		progress: agent.progress,
+		lifecycle: agent.lifecycle,
 		stream: agent.stream,
 		streamDone: agent.streamDone,
 		activeTools: agent.activeTools,
 		working: agent.working,
 		readOnly: false,
 		uiRequest: null,
-		notices: Object.freeze([]),
+		notices: agent.notices,
 	} as GuestSnapshot;
 }
