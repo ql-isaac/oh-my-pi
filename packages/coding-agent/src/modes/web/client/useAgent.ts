@@ -3,7 +3,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { HostFrame, SessionEntry, SessionState, AgentEvent, AssistantMessage, ActiveTool } from "@oh-my-pi/pi-wire";
+import type { AgentSnapshot, HostFrame, SessionEntry, SessionState, AgentEvent, AssistantMessage, ActiveTool, SubagentProgressPayload, SubagentLifecyclePayload } from "@oh-my-pi/pi-wire";
+import type { Notice, TranscriptResult } from "@oh-my-pi/collab-web/guest-client";
 
 export type ConnectionPhase = "connecting" | "selecting" | "live" | "reconnecting" | "ended";
 
@@ -34,6 +35,10 @@ export interface UseAgentReturn {
 	activeTools: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
 	state: SessionState | null;
+	agents: readonly AgentSnapshot[];
+	progress: ReadonlyMap<string, SubagentProgressPayload>;
+	lifecycle: ReadonlyMap<string, SubagentLifecyclePayload>;
+	notices: readonly Notice[];
 	sessionList: SessionListPayload | null;
 	sessionListError: string | null;
 	switching: boolean;
@@ -44,6 +49,8 @@ export interface UseAgentReturn {
 	newSession: () => void;
 	refreshSessionList: () => void;
 	deleteSession: (path: string) => Promise<boolean>;
+	sendAgentCmd: (cmd: "chat" | "kill" | "revive", agentId: string, text?: string) => void;
+	fetchTranscript: (agentId: string, fromByte: number) => Promise<TranscriptResult | null>;
 }
 
 function wsUrl(): string {
@@ -53,9 +60,12 @@ function wsUrl(): string {
 
 export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 	const wsRef = useRef<WebSocket | null>(null);
-	const reconnectRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+	const reconnectRef = useRef<Timer | undefined>(undefined);
 	const pendingChunks = useRef<SessionEntry[]>([]);
 	const chunkFinalRef = useRef(false);
+	const pendingTranscripts = useRef(new Map<number, { resolve: (r: TranscriptResult | null) => void; timer: Timer }>());
+	const reqSeqRef = useRef(0);
+	const noticeSeqRef = useRef(0);
 
 	const [phase, setPhase] = useState<ConnectionPhase>("connecting");
 	const [endedReason, setEndedReason] = useState<string | null>(null);
@@ -74,6 +84,10 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 	const [activeTools, setActiveTools] = useState<ReadonlyMap<string, ActiveTool>>(new Map());
 	const [working, setWorking] = useState(false);
 	const [state, setState] = useState<SessionState | null>(null);
+	const [agents, setAgents] = useState<readonly AgentSnapshot[]>([]);
+	const [progress, setProgress] = useState<ReadonlyMap<string, SubagentProgressPayload>>(new Map());
+	const [lifecycle, setLifecycle] = useState<ReadonlyMap<string, SubagentLifecyclePayload>>(new Map());
+	const [notices, setNotices] = useState<readonly Notice[]>([]);
 	const [sessionList, setSessionList] = useState<SessionListPayload | null>(null);
 	const [sessionListError, setSessionListError] = useState<string | null>(null);
 	/** Set while a `resume`/`new` is in flight; picker is disabled until the
@@ -90,8 +104,19 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 		streamDoneRef.current = false;
 		setActiveTools(new Map());
 		setWorking(false);
+		setAgents([]);
+		setProgress(new Map());
+		setLifecycle(new Map());
 		pendingChunks.current = [];
 		chunkFinalRef.current = false;
+	}, []);
+
+	const pushNotice = useCallback((level: Notice["level"], message: string) => {
+		setNotices(prev => {
+			const next = [...prev, { id: ++noticeSeqRef.current, level, message, at: Date.now() }];
+			if (next.length > 50) next.splice(0, next.length - 50);
+			return next;
+		});
 	}, []);
 
 	const connect = useCallback(() => {
@@ -144,6 +169,9 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 					}
 					setState(frame.state);
 					setWorking(frame.state.isStreaming);
+					setAgents(frame.agents ?? []);
+					setProgress(new Map());
+					setLifecycle(new Map());
 					// Server has accepted our session pick and shipped the snapshot;
 					// move out of the picker.
 					setPhase("live");
@@ -178,7 +206,7 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 				}
 				case "event": {
 					handleEvent(frame.event, {
-						setStream, setStreamDone, setActiveTools, setWorking, setState,
+						setStream, setStreamDone, setActiveTools, setWorking, setState, pushNotice,
 					});
 					break;
 				}
@@ -203,6 +231,33 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 				case "bye": {
 					setPhase("ended");
 					setEndedReason(frame.reason);
+					break;
+				}
+				case "agents": {
+					setAgents(frame.agents);
+					break;
+				}
+				case "bus": {
+					if (frame.channel === "task:subagent:progress") {
+						const payload = frame.data as SubagentProgressPayload;
+						setProgress(prev => new Map(prev).set(payload.progress.id, payload));
+					} else if (frame.channel === "task:subagent:lifecycle") {
+						const payload = frame.data as SubagentLifecyclePayload;
+						setLifecycle(prev => new Map(prev).set(payload.id, payload));
+					}
+					break;
+				}
+				case "transcript": {
+					const pending = pendingTranscripts.current.get(frame.reqId);
+					if (pending) {
+						pendingTranscripts.current.delete(frame.reqId);
+						clearTimeout(pending.timer);
+						pending.resolve(
+							frame.error !== undefined
+								? { kind: "error", message: frame.error }
+								: { kind: "rows", text: frame.text, newSize: frame.newSize },
+						);
+					}
 					break;
 				}
 			}
@@ -308,9 +363,19 @@ export function useAgent(opts?: { initialSessionId?: string }): UseAgentReturn {
 
 	return {
 		phase, endedReason, entries, stream, streamDone, activeTools, working, state,
+		agents, progress, lifecycle, notices,
 		sessionList, sessionListError, switching,
 		sendPrompt, abort, reconnect, selectSession, newSession, refreshSessionList: fetchSessionList,
 		deleteSession,
+		sendAgentCmd: (cmd: "chat" | "kill" | "revive", agentId: string, text?: string) => sendGuestFrame({ t: "agent-cmd", cmd, agentId, text }),
+		fetchTranscript: (agentId: string, fromByte: number) => {
+			const reqId = ++reqSeqRef.current;
+			const { promise, resolve } = Promise.withResolvers<TranscriptResult | null>();
+			const timer = setTimeout(() => { pendingTranscripts.current.delete(reqId); resolve(null); }, 10_000);
+			pendingTranscripts.current.set(reqId, { resolve, timer });
+			sendGuestFrame({ t: "fetch-transcript", reqId, agentId, fromByte });
+			return promise;
+		},
 	};
 }
 
@@ -322,6 +387,7 @@ function handleEvent(
 		setActiveTools: (cb: (prev: Map<string, ActiveTool>) => Map<string, ActiveTool>) => void;
 		setWorking: (w: boolean) => void;
 		setState: (s: SessionState | ((prev: SessionState | null) => SessionState | null)) => void;
+		pushNotice: (level: Notice["level"], message: string) => void;
 	},
 ): void {
 	switch (event.type) {
@@ -366,6 +432,20 @@ function handleEvent(
 			break;
 		case "agent_end":
 			ctx.setWorking(false);
+			break;
+		case "notice":
+			ctx.pushNotice(event.level, event.message);
+			break;
+		case "auto_retry_start":
+			ctx.pushNotice("info", `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
+			break;
+		case "auto_compaction_start":
+			ctx.pushNotice("info", `compacting context (${event.reason})`);
+			break;
+		case "auto_compaction_end":
+			if (!event.skipped) {
+				ctx.pushNotice("info", event.aborted ? "compaction aborted" : event.errorMessage ? `compaction failed: ${event.errorMessage}` : "context compacted");
+			}
 			break;
 	}
 }
