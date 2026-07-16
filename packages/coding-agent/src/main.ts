@@ -423,7 +423,9 @@ async function runInteractiveMode(
 	initialImages?: ImageContent[],
 	joinLink?: string,
 	webClient?: string,
-): Promise<void> {
+	/** Raw --resume value (short id or path) for the web-client to resolve. */
+	resumeArg?: string,
+ ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
 		version,
@@ -512,7 +514,10 @@ async function runInteractiveMode(
 		// Branch-only web client: keep web guest code out of normal interactive startup.
 		const { WebGuestLink } = await import("./modes/web/web-guest");
 		const guest = new WebGuestLink(mode, webClient);
-		const sessionPath = session.sessionManager.getSessionFile() ?? undefined;
+		// Prefer the raw --resume value so the server can resolve short ids
+		// against its /api/sessions (the local placeholder session has no
+		// useful file path - the server is the source of truth).
+		const sessionPath = resumeArg ?? session.sessionManager.getSessionFile() ?? undefined;
 		using _keepalive = new EventLoopKeepalive();
 		await guest.connect(sessionPath);
 	}
@@ -732,6 +737,14 @@ export async function createSessionManager(
 	activeSettings: Settings = settings,
 	askToMoveSession: SessionPrompt = promptMoveSession,
 ): Promise<SessionManager | undefined> {
+	// Web-client mode: the TUI attaches to a running `omp --mode web` server.
+	// All session state lives on the server; locally we just need a placeholder
+	// AgentSession that the WebGuestLink will overwrite via its replica file.
+	// Skip --resume/--fork/move prompts entirely - the server resolves the
+	// resume target via its own /api/sessions and a local fork would be
+	// invisible to the server.
+	if (parsed.webClient !== undefined) return undefined;
+
 	if (parsed.fork) {
 		if (parsed.noSession) {
 			throw new SessionResolutionError("--fork requires session persistence");
@@ -1391,7 +1404,14 @@ export async function runRootCommand(
 		throw error;
 	}
 
-	if ((typeof parsedArgs.resume === "string" || foreignSource) && sessionManager) {
+	// Skip the local resume/cwd switch when --web-client owns session state:
+	// the running web mode server is the source of truth, so re-scoping here
+	// would tear down a placeholder session it has already overwritten.
+	if (
+		(typeof parsedArgs.resume === "string" || foreignSource) &&
+		sessionManager &&
+		parsedArgs.webClient === undefined
+	) {
 		const previousCwd = cwd;
 		cwd = await switchToResumedProject(sessionManager.getCwd(), settingsInstance, pluginPreloadPromise);
 		if (cwd !== previousCwd) {
@@ -1406,8 +1426,9 @@ export async function runRootCommand(
 	}
 
 	// User declined the missing-directory move prompt — exit cleanly instead of
-	// letting the cancellation fall through to a new session.
-	if (typeof parsedArgs.resume === "string" && !sessionManager) {
+	// letting the cancellation fall through to a new session. Skip this branch
+	// under --web-client too, since the server owns cancellation UX in that mode.
+	if (typeof parsedArgs.resume === "string" && !sessionManager && parsedArgs.webClient === undefined) {
 		writeStartupNotice(parsedArgs, `${chalk.dim("Resume cancelled: session was not moved.")}\n`);
 		stopStartupWatchdog();
 		process.exit(0);
@@ -1733,6 +1754,7 @@ export async function runRootCommand(
 				initialImages,
 				parsedArgs.join,
 				parsedArgs.webClient,
+				typeof parsedArgs.resume === "string" ? parsedArgs.resume : undefined,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
