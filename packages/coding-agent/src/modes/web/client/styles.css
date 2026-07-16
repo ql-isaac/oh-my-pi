@@ -30,17 +30,6 @@
 	align-items: center;
 }
 
-.sh-content {
-	flex: 1 1 auto;
-	overflow-y: auto;
-	display: flex;
-	flex-direction: column;
-	/* Centre the transcript column (max-width 880px) on wide viewports. The
-	 * composer's `.sh-composer-inner` is already capped at the same width
-	 * inside collab-web's shell.css, so this keeps the two columns visually
-	 * aligned. */
-	align-items: center;
-}
 
 .sh-transcript {
 	flex: 1 1 auto;
