@@ -1147,12 +1147,12 @@ export async function updateViaBinaryAt(
 /**
  * Run the update command.
  */
-export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
+export async function runUpdateCommand(opts: { force: boolean; check: boolean; yes?: boolean }): Promise<void> {
 	// Source installs (git clones) are handled by the git-based update flow;
 	// detect and delegate when we are in a recognised clone.
 	const gitTarget = await detectGitTarget();
 	if (gitTarget) {
-		await runGitUpdate(gitTarget, opts);
+		await runGitUpdate(gitTarget, { ...opts, yes: opts.yes ?? false });
 		return;
 	}
 	console.log(chalk.dim(`Current version: ${VERSION}`));

@@ -9,14 +9,22 @@ import { $which } from "@oh-my-pi/pi-utils";
 
 async function runGit(cwd: string, args: readonly string[], signal?: AbortSignal): Promise<void> {
 	if (!$which("git")) throw new Error("git is not installed.");
+	// Stream stdout straight to the parent's terminal so a long rebase
+	// (`Applying: <sha>...`) isn't silent. Stderr stays captured: when the
+	// command exits non-zero the captured text is the user-visible failure
+	// reason, and on success stderr from `git rebase` is empty.
 	const proc = Bun.spawn(["git", ...args], {
 		cwd,
 		signal,
-		stdout: "pipe",
+		stdout: "inherit",
 		stderr: "pipe",
 		windowsHide: true,
 	});
-	const stderrReader = proc.stderr ? new Response(proc.stderr).text() : Promise.resolve("");
+	if (!proc.stderr) {
+		await proc.exited;
+		return;
+	}
+	const stderrReader = new Response(proc.stderr).text();
 	const [stderr, exitCode] = await Promise.all([stderrReader, proc.exited]);
 	if (exitCode !== 0) {
 		const message = stderr.trim() || `git ${args.join(" ")} failed with exit code ${exitCode}`;

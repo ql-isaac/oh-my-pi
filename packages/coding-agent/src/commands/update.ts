@@ -23,6 +23,11 @@ export default class Update extends Command {
 			description: "Check for updates without installing",
 			default: false,
 		}),
+		yes: Flags.boolean({
+			char: "y",
+			description: "Skip the git-source install confirmation prompt",
+			default: false,
+		}),
 		plugins: Flags.boolean({
 			char: "l",
 			description: "Update installed plugins",
@@ -43,7 +48,7 @@ export default class Update extends Command {
 		if (flags.plugins) {
 			await pluginCli.runPluginCommand({ action: "upgrade", args: [], flags: {} });
 		} else {
-			await updateCli.runUpdateCommand({ force: flags.force, check: flags.check });
+			await updateCli.runUpdateCommand({ force: flags.force, check: flags.check, yes: flags.yes });
 		}
 	}
 }
